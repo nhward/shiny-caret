@@ -1,71 +1,83 @@
-# Shiny Caret is an interactive interface for using various machine
-# learning methods from the caret package
-# (c) Nick Ward (University of Canterbury) 2018
+# Shiny Caret is an interactive interface for using various machine learning methods from the caret package
+# (c) Nick Ward (University of Canterbury) 2018-2020 ----
 
-#shiny
-library(shiny)
-library(shinyjs)
-library(shinyalert)
-library(DT)
-#caret
-library(caret)
-library(recipes)
-library(caretEnsemble) # look into this
-#    library(embed) # look into this
-#Data manipulation
-library(plyr)
-library(dplyr)
-library(reshape2)
-library(stringr)
-library(summarytools)
-library(ROSE)
-library(doParallel)
-#Graphics
-library(naniar)
-library(vcd)
-library(ellipse)
-library(corrplot)
-library(lattice)
-library(ggrepel)
-library(RANN) # check need
-library(PerformanceAnalytics)
-library(ggplot2)
-library(alluvial)
-library(RColorBrewer)
-library(dimRed)
-library(rpart.plot)
-
-options(shiny.maxRequestSize=50*1024^2)
-
-###########################################################################
-### Server logic
+# Server Code ------------------------------------------------------
 shinyServer(function(input, output, session) {
-
+  
+  # input ServerFile ------------------------------------------------------
+  shinyFiles::shinyFileChoose(input, 'ServerFile', session = session, roots = roots, defaultRoot = "wd")
+  
+  # reactive  values ------------------------------------------------------
   react <- reactiveValues(
     ModelSet = list(),
     Recipe = NULL,
+    RecipeChanged = 0,
     Log = c(),
-    partitionMessages = c(),
-    AllowEnsemble = FALSE
+    Warn = c(),
+    AllowEnsemble = FALSE,
+    Prob2Class = FALSE,
+    MethodSet = c(),
+    Help = TRUE,
+    HighCardinality = c(),
+    ROC = NULL,
+    File = NULL
   )
 
-  ###########################################################################
-  onSessionEnded( function() {
-    #   stopApp()
-  }, session = session)
-
-  ###########################################################################
-  observeEvent(input$DataSource, {
-    shinyjs::toggle(id = "Header", condition = input$DataSource == "CSV file")
-    shinyjs::toggle(id = "DateFormat", condition = input$DataSource == "CSV file")
-    shinyjs::toggle(id = "Sep", condition = input$DataSource == "CSV file")
-    shinyjs::toggle(id = "Quote", condition = input$DataSource == "CSV file")
-    shinyjs::toggle(id = "CSVFile", condition = input$DataSource == "CSV file")
-    shinyjs::toggle(id = "Package", condition = input$DataSource == "R dataset")
-    shinyjs::toggle(id = "DataSet", condition = input$DataSource == "R dataset")
+  # on session ended ------------------------------------------------------
+  onSessionEnded(fun = function() {
+    print("Cleaning up")
+    rm(list = ls(all.names = TRUE))
+    gc()
+    stopApp()
   })
 
-  ###########################################################################
+  # observe event Project ------------------------------------------------------ 
+  observeEvent(input$Project, {
+    req(input$Project != "")
+    FileName <- paste0(input$Project, ".RDA")
+    if (file.exists(FileName)) {
+      print("NOT Loading previous session")
+    #   INPUT <- NULL
+    #   load(file = FileName)
+    #   if (INPUT$DataSource != input$DataSource) {
+    #     updateTabItems(session = session, inputId = "DataSource", selected = INPUT$DataSource)
+    #   }
+    #   if (INPUT$Package != input$Package) {
+    #     updateSelectInput(session = session, inputId = "Package", selected = INPUT$Package)
+    #   }
+    #   if (INPUT$DataSet != input$DataSet) {
+    #     updateSelectInput(session = session, inputId = "DataSet", selected = INPUT$DataSet)
+    #   }
+    # 
+    #   if (input$Target != input$Target) {
+    #     updateSelectInput(session = session, inputId = "Target", selected = input$Target)
+    #   }
+    #   if (INPUT$AddWeights != input$AddWeights) {
+    #     updateSelectInput(session = session, inputId = "AddWeights", selected = INPUT$AddWeights)
+    #   } else if (INPUT$Weights != input$Weights) {
+    #     updateSelectInput(session = session, inputId = "Weights", selected = INPUT$Weights)
+    #   }
+    #   if (INPUT$AddIds != input$AddIds) {
+    #     updateSelectInput(session = session, inputId = "AddIds", selected = INPUT$AddIds)
+    #   } else if (INPUT$ID != input$ID) {
+    #     updateSelectInput(session = session, inputId = "ID", selected = INPUT$ID)
+    #   }
+    }
+  })
+
+  # observe event Save ------------------------------------------------------
+  observeEvent(input$Save, {
+    req(input$Project != "")
+    print("Saving state")
+    FileName <- paste0(input$Project, ".RDA")
+    INPUT <- shiny::reactiveValuesToList(input)
+    REACT <- shiny::reactiveValuesToList(react)
+    save(list = c("INPUT", "REACT"), file = FileName)
+    print(INPUT)
+    print(REACT)
+  })
+  
+  # observe event Package ------------------------------------------------------
   observeEvent(input$Package, {
     results <- data(package = input$Package)$results
     if (nrow(results) == 0 || ncol(results) != 4) {
@@ -82,92 +94,227 @@ shinyServer(function(input, output, session) {
       if (length(choices) == 0) {
         updateSelectInput(session = session, inputId = "DataSet", choices = "", selected = "")
       } else {
-        updateSelectInput(session = session, inputId = "DataSet", choices = choices, selected = choices[1])
+        updateSelectInput(session = session, inputId = "DataSet", choices = as.list(choices), selected = as.list(choices[1]))
       }
     }
   })
 
-  ###########################################################################
-  getRawData <- reactive({
-    req(input$DataSource)
-    input$CSVFile
-    input$DataSet
-    isolate({
-      if (input$DataSource == "CSV file") {
-        req(input$CSVFile, input$CSVFile != "")
-      } else if(input$DataSource == "R dataset") {
-        req(input$Package, input$DataSet, input$DataSet != "")
-      }
-      d <- tryCatch({
-        if (input$DataSource == "CSV file") {
-          # when reading semicolon separated files,
-          # having a comma separator causes `read.csv` to error
-          d <- read.csv(input$CSVFile$datapath,
-                        header = input$Header,
-                        sep = input$Sep,
-                        quote = input$Quote)
-          req(d)
-
-          # converts whole-number columns to "integer"
-          numCols <- colnames(d)[unlist(lapply(d, is.numeric))]
-          for (col in numCols) {
-            if (all(is.wholenumber(d[,col]))) {
-              #print(paste("Changing numeric column", colnames(d)[col], "to integer"))
-              d[,col] <- as.integer(d[,col])
-            }
-          }
-
-          # converts >90% unique factors back to character or date variables
-          factCols <- which(allClass(d) == "factor")
-          max <- nrow(d)
-          for (col in factCols) {
-            if (nlevels(d[,col])/max > 0.9) {
-              #print(paste("Changing factor column", colnames(d)[col], "to character"))
-              d[,col] <- as.character(d[,col])
-            }
-          }
-
-          # converts 100% compatible character columns back to date variables
-          charCols <- which(allClass(d) == "character")
-          for (col in charCols) {
-            dates <- as.Date(d[,col], input$DateFormat)
-            if (all(is.na(dates) == is.na(d[,col]))) {
-              #print(paste("Changing character column", colnames(d)[col], "to date"))
-              d[,col] <- dates
-            }
-          }
-        } else if(input$DataSource == "R dataset") {
-          if (input$Package == "All") {
-            data(list = input$DataSet)
-            d <- get(input$DataSet)
+  # reactive function LoadFileType ------------------------------------------------------
+  LoadFileType <- reactive({
+    d <- tryCatch({
+      # when reading semicolon separated files, having a comma separator causes `read.csv` to error - hence the trycatch
+      if (grepl("\\.csv$", react$File, ignore.case = TRUE)) {
+        dd <- read.csv(react$File, header = input$Header, sep = input$Sep, quote = input$Quote, na.strings = input$MissingStrings, 
+                       dec = input$Decimal, check.names = TRUE, strip.white = TRUE, stringsAsFactors = FALSE)
+        dd
+      } else if (grepl("\\.xls.{0,1}$", react$File, ignore.case = TRUE)) {
+        dd <- as.data.frame(readxl::read_excel(react$File, sheet = 1, na = input$MissingStrings, col_names = input$Header))
+        dd
+      } else if (grepl("\\.rdata$", react$File, ignore.case = TRUE)) {
+          # when reading semicolon separated files, having a comma separator causes `read.csv` to error - hence the trycatch
+          loaded <- new.env()
+          what <- load(react$File, envir = loaded)
+          req(len(what) > 0)
+          if (length(what) > 1) {
+            #create alert to resolve VarName 
+            choices <- what[base::apply(X = what, FUN = is.data.frame)]
+            showElement(id = "VarName")
+            #   updateSelectInput(session = session, inputId = "VarName", choices = choices)
+            get(input$VarName, envir = loaded)
           } else {
-            data(list = input$DataSet, package = input$Package)
-            d <- get(input$DataSet, asNamespace(input$Package))
+            hideElement(id = "VarName")
+            get(what, envir = loaded)
           }
-        }
-        as.data.frame(d)
-      },
-      warn = function(e) {
-        shinyalert(title = paste0("Dataset \"",input$DataSet,"\" did not load"), text = e$message, type = "warning")
-        NULL},
-      error = function(e) {
-        shinyalert(title = paste0("Dataset \"",input$DataSet,"\" did not load"), text = e$message, type = "error")
-        NULL
-      })
-      req(d, nrow(d) > 0, ncol(d) > 0)
-      updateSelectInput(session=session, inputId = "Class", selected = "")
-      updateSelectInput(session=session, inputId = "Weights", selected = "")
-      updateSelectInput(session=session, inputId = "PreSplit", selected = "")
-      updateSelectInput(session=session, inputId = "ID", selected = NULL)
-      updateSelectInput(session=session, inputId = "HideCol", selected = NULL)
-      d
+      }
+      
+    },
+    warn = function(e) {
+      shinyalert(title = paste0("File \"",react$File,"\" did not load"), text = e$message, type = "warning")
+      NULL},
+    error = function(e) {
+      shinyalert(title = paste0("File \"",react$File,"\" did not load"), text = e$message, type = "error")
+      NULL
     })
+    names(d) <- make.names(names(d),unique = TRUE)
+    d
   })
 
-  ###########################################################################
-  output$RawData <- DT::renderDataTable({
+  # reactive function loadR ------------------------------------------------------
+  loadR <- reactive({
+    d <- tryCatch({
+      if (input$Package == "All") {
+        data(list = input$DataSet)
+        get(input$DataSet)
+      } else {
+        data(list = input$DataSet, package = input$Package)
+        get(input$DataSet, asNamespace(input$Package))
+      }
+    },
+    warn = function(e) {
+      shinyalert(title = paste0("Dataset \"",input$DataSet,"\" did not load"), text = e$message, type = "warning")
+      NULL},
+    error = function(e) {
+      shinyalert(title = paste0("Dataset \"",input$DataSet,"\" did not load"), text = e$message, type = "error")
+      NULL
+    })
+  })
+  
+  # reactive Continuous ####------------------------------------------------------------
+  Continuous <- reactive({
+    input$Continuous
+  })
+  getContinuousDebounced <- debounce(Continuous, millis = 1000)
+  
+  # reactive function getRawData ------------------------------------------------------
+  getRawData <- reactive({
+    req(input$DataSource)
+    if (input$DataSource == "Server Data File") {
+      req(!is(input$ServerFile, "shinyActionButtonValue"))
+      sfile <- shinyFiles::parseFilePaths(roots, input$ServerFile)
+      react$File <- sfile$datapath
+      updateTextInput(session = session, inputId = "Project", value = sfile$name)
+      d <- LoadFileType()
+      
+    } else if (input$DataSource == "Local Data File") {
+      req(input$LocalFile)
+      react$File <- input$LocalFile$datapath
+      updateTextInput(session = session, inputId = "Project", value = input$LocalFile$name)
+      d <- LoadFileType()
+      
+    } else if (input$DataSource == "Remote Data Resource") {
+      req(input$URL)
+      URL <- input$URL
+      react$File <- URL
+      updateTextInput(session = session, inputId = "Project", value = URL)
+      d <- LoadFileType()
+      
+    } else if (input$DataSource == "Package Dataset") {
+      req(input$Package != "", input$DataSet != "")
+      name <- paste(sep = "::", input$Package, input$DataSet)
+      updateTextInput(session = session, inputId = "Project", value = name)
+      d <- loadR()
+    }
+    req(d, nrow(d) > 0, ncol(d) > 0)
+    
+    showNotification(id = "checking", ui = "Checking column types", duration = NULL)
+    # converts whole-number columns to "integer"
+    numCols <- which(allClass(d) == "numeric")
+    for (col in numCols) {
+      if (all(is.wholenumber(d[,col]))) {
+        showNotification(ui = paste("Changing numeric column", colnames(d)[col], "to integer"), duration = 3)
+        d[,col] <- as.integer(d[,col])
+      }
+    }
+    
+    # converts 100% compatible character columns back to date variables
+    charCols <- which(allClass(d) %in% c("character","factor"))
+    for (col in charCols) {
+      dates <- as.Date(d[,col], format = input$DateFormat)
+      if (all(is.na(dates) == is.na(d[,col]))) {
+        showNotification(ui = paste("Changing character column", colnames(d)[col], "to date"), duration = 3)
+        d[,col] <- dates
+      }
+    }
+    
+    # converts <= 15 unique levels to factor
+    charCols <- which(allClass(d) == "character")
+    max <- nrow(d)
+    for (col in charCols) {
+      if (length(unique(d[,col])) <= getContinuousDebounced()[1]) {
+        showNotification(ui = paste("Changing text column", colnames(d)[col], "to factor"), duration = 3)
+        d[,col] <- as.factor(d[,col])
+      }
+    }
+    
+    updateTextInput(session = session, inputId = "Project", value = input$CSVFile$name)
+    d
+    removeNotification(id = "checking")
+    
+    choices <- formattedColNames(d)
+    CHOICES <- toupper(choices)
+    
+   #set a default value for input$Target and appropriate choices
+    best <- c( choices[CHOICES == "TARGET"],
+               choices[CHOICES == "Y"],
+               choices[CHOICES == "CLASS"],
+               choices[CHOICES == "LABEL"],
+               choices[CHOICES == "CHURN"],
+               rev(choices) 
+    )
+    guess <- best[1]
+    updateSelectInput(session = session, inputId = "Target", choices = as.list(choices), selected = as.list(guess))
+    updateSelectInput(session = session, inputId = "Weights", selected = "")
+    updateSelectInput(session = session, inputId = "PreSplit", selected = "")
+    updateSelectizeInput(session = session, inputId = "ID", selected = list())
+    updateSelectInput(session = session, inputId = "HideCol", selected = list())
+    updateSelectInput(session = session, inputId = "Group", selected = NULL)
+    updateCheckboxInput(session = session, inputId = "AddWeights", value = FALSE)
+    updateSelectInput(session = session, inputId = "BalanceFactors", selected = NULL)
+    d
+  })
+  
+  # render ObservationCount ------------------------------------------------------
+  output$ObservationCount <- renderInfoBox({
     d <- getRawData()
-    dt <- DT::datatable(data = d, rownames = TRUE, selection = "none")
+    infoBox(title = "Observations", value = nrow(d), icon = icon("align-justify"), color = DATAColour, fill = TRUE )
+  })
+  
+  # render VariableCount ------------------------------------------------------
+  output$VariableCount <- renderInfoBox({
+    d <- getRawData()
+    infoBox(title = "Variables", value = ncol(d), icon = icon("columns"), color = DATAColour, fill = TRUE)
+  })
+  
+  # reactive GetData ------------------------------------------------------
+  getData <- reactive({
+    d <- getRawData()
+    req(d)
+    req(nrow(d) > 0, ncol(d) > 0, length(colnames(d)) > 0)
+
+    # ensure target is factor for Classification
+    if (isRoleValid(input$Target, d) && is.binary(d[, input$Target, drop = TRUE])) {
+      tar <- d[, input$Target]
+      d[, input$Target] <- as.factor(tar)
+      showNotification(ui = "Converting binary outcome variable to nominal", type = "warning")
+    }
+    
+    #clean up invalid factor level names
+    for (col in 1:ncol(d)) {
+      var <- d[,col, drop = TRUE]
+      if (is(var, "factor")) {
+        newNames <- make.names(levels(var))
+        if (any(newNames != levels(var))) {
+          levels(d[,col]) <- newNames
+          #print(levels(d[,col]))
+        }
+      }
+    }
+    
+    if (input$AddWeights && length(input$BalanceFactors) > 0) {
+      d <- observationWeights(factors = input$BalanceFactors, data = d)
+    }
+
+    if (input$AddIds) {
+      if (!any(is.na(as.numeric(rownames(d))))) { 
+        d$RowName <- as.numeric(rownames(d))
+      } else {
+        d$RowName <- rownames(d)
+      }
+    }
+    d
+  })
+
+  # render Data ------------------------------------------------------
+  output$Data <- DT::renderDataTable({
+    d <- getData()
+    dt <- DT::datatable(data = d, rownames = TRUE, selection = "none",
+                        extensions = c('Scroller','FixedHeader'),
+                        options = list(
+                          scrollX = TRUE,
+                          deferRender = TRUE,
+                          scrollY = 540,
+                          scroller = TRUE
+                        ))
     numericCols <- colnames(d)[unlist(lapply(d, is.numeric))]
     integerCols <- colnames(d)[unlist(lapply(d, is.wholenumber))]
     numericCols <- setdiff(numericCols, integerCols)
@@ -178,103 +325,85 @@ shinyServer(function(input, output, session) {
       dt <- formatRound(table = dt, columns = integerCols, digits = 0)
     }
     dt
-  }, server = TRUE)
-
-  ###########################################################################
-  # Removes any hidden columns from the Raw Data
-  getData <- reactive({
-    d <- getRawData()
-    req(d)
-    req(nrow(d) > 0, ncol(d)>0, length(colnames(d))> 0)
-
-    #remove ID columns (after setting the row-names)
-    if(!is.null(input$ID) & length(input$ID) > 0) {
-      ids <- which(colnames(d) %in% input$ID)
-      rn <- do.call(paste, c(d[ids], sep=":"))
-      if (anyDuplicated(rn)) {
-        rn <- paste(sep = "-", 1:length(rn),rn) #make unique
-      }
-      rownames(d) <- rn # assign the id column info to the row names
-      #print(paste("dropping", colnames(d)[ids]))
-      d <- d[,-ids]
-    }
-
-    # remove hidden
-    if(!is.null(input$HideCol) && length(input$HideCol) > 0 && all(input$HideCol %in% colnames(d))) {
-      d <- d[,-which(colnames(d) %in% input$HideCol)]
-    }
-    # remove PreSplit
-    if(!is.null(input$PreSplit) & input$PreSplit != "" & length(input$PreSplit) > 0) {
-      d <- d[, colnames(d) != input$PreSplit]
-    }
-
-    # remove obs where target is missing
-    if(input$Class %in% colnames(d)) {
-      d <- d[!is.na(d[,input$Class]),]
-    }
-
-    # ensure target is factor for Classification
-    if (input$ProbType == "Classification" && input$Class %in% colnames(d) && is.numeric(d[,input$Class])) {
-      d[, input$Class] <- as.factor(d[, input$Class])
-    }
-
-    #clean up invalid factor level names
-    for (col in 1:ncol(d)) {
-      var <- d[,col, drop = TRUE]
-      if (is(var, "factor")) {
-        newNames <- make.names(levels(var))
-        if (any(newNames!=levels(var))) {
-          levels(d[,col]) <- newNames
-          #print(levels(d[,col]))
-        }
-      }
-    }
-    d
   })
 
-  ###########################################################################
+
+  # reactive function getSomeRawData ------------------------------------------------------
   getSomeRawData <- reactive({
     # grab a representative subsample of the data
     d <- getRawData()
     req(is(d,"data.frame"))
-    if(nrow(d) <= maxRows) {
+    mrow <- getMaxRowsDebounced()
+    if (nrow(d) <= mrow) {
       return(d)
     } else {
-      rows <- sample(nrow(d), maxRows)
+      rows <- sample(nrow(d), mrow)
       #preserve order
       rows <- sort(rows, decreasing = FALSE)
       return(d[rows,])
     }
   })
 
-  ###########################################################################
+  
+  # reactive getMaxRows  ------------------------------------------------------
+  MaxRows <- reactive({
+     input$MaxRows  
+  })
+  getMaxRowsDebounced <- debounce(MaxRows, millis = 1000)
+  
+  # reactive getSomeData ------------------------------------------------------
   getSomeData <- reactive({
     # grab a representative subsample of the data
     d <- getData()
     req(is(d,"data.frame"))
-    if(nrow(d) <= maxRows) {
+    if (input$ID != "" & input$ID %in% colnames(d)) {
+      rownames(d) <- d[, input$ID]
+    }
+    mrow <- getMaxRowsDebounced()
+    if (nrow(d) <= mrow) {
       return(d)
     } else {
-      rows <- sample(nrow(d), maxRows)
+      rows <- sample(nrow(d), mrow)
       #preserve order
       rows <- sort(rows, decreasing = FALSE)
       return(d[rows,])
     }
   })
+  
+  # reactive getSomePredictorData ------------------------------------------------------
+  # predictors plus outcome - actually
+  getSomePredictorData <- reactive({
+    d <- getSomeData()
+    leaveOut <- getNonPredictors()
+    d[, !colnames(d) %in% leaveOut]
+  })
 
-  ###########################################################################
+  # reactive getPredictorData ------------------------------------------------------
+  # predictors plus outcome - actually
+  getPredictorData <- reactive({
+    d <- getData()
+    leaveOut <- getNonPredictors()
+    d[, !colnames(d) %in% leaveOut]
+  })
+
+  # reactive getRawDataSummary ------------------------------------------------------
   getRawDataSummary <- reactive({
     d <- getSomeRawData()
     DataSummary(d)
   })
 
-  ###########################################################################
+  Multiplier <- reactive({
+    input$Multiplier
+  })
+  getMultiplier <- debounce(Multiplier, millis = 1000)
+  
+  # reactive getDataSummary ------------------------------------------------------
   getDataSummary <- reactive({
     d <- getSomeData()
-    DataSummary(d)
+    DataSummary(d, getMultiplier(), input$UseYJ)
   })
 
-  ###########################################################################
+  # observe ------------------------------------------------------
   observe({
     d <- getRawData()
     req(d)
@@ -282,78 +411,99 @@ shinyServer(function(input, output, session) {
     ds <- getRawDataSummary()
     choices <- colnames(d)
     names(choices) <- paste0(choices, " [", ds$type, "]")
-
-    #set a default value for input$HideCol and appropriate choices
-    use <- union(isolate(input$HideCol), colnames(d)[ds$constant])
-    updateSelectInput(session = session, inputId = "HideCol", choices = choices, selected = sort(use))
+    #set appropriate choices
+    updateSelectInput(session = session, inputId = "HideCol", choices = as.list(choices))
   })
 
-  ###########################################################################
-  observe({
+  # reactive getDataSummary ------------------------------------------------------
+  getIDChoices <- reactive({
     ds <- getDataSummary()
-    choices <- rownames(ds)
-    names(choices) <- paste0(choices, " [",ds$type,"]")
-
-    #set a default value for input$Class and appropriate choices
-    defaultClass <- isolate(input$Class)
-    if(!(defaultClass %in% choices)) {
-      best <- c( choices[which(toupper(choices)=="TARGET")],
-                 choices[which(toupper(choices)=="Y")],
-                 choices[which(toupper(choices)=="CLASS")],
-                 choices[which(toupper(choices)=="LABEL")],
-                 choices[which(toupper(choices)=="CHURN")],
-                 choices[which(ds$numeric)],
-                 choices[which(ds$factor)],
-                 choices )
-      defaultClass <- best[1]
+    choicesID <- rownames(ds)
+    names(choicesID) <- paste0(choicesID, " [",ds$type,"]")
+    index <- ds$uniqueRatio == 1 & (ds$wholeNumb | ds$text | ds$date)
+    if (any(index)) {
+      choicesID <- choicesID[index]
+    } else {
+      choicesID <- c()
     }
-    updateSelectInput(session = session, inputId = "Class", choices = choices, selected = defaultClass)
+    as.list(choicesID)
   })
 
-  ###########################################################################
-  observe({
-    ds <- getRawDataSummary()
-    choices <- rownames(ds)
-    names(choices) <- paste0(choices, " [",ds$type,"]")
+  # observe event AddIds ------------------------------------------------------
+  # observeEvent(
+  #   input$AddIds,
+  #   {
+  #     #set a default value for input$ID and appropriate choices
+  #     if (input$AddIds) {
+  #       updateSelectInput(session = session, inputId = "ID", choices = c("RowName"), selected = "RowName")
+  #       shinyjs::disable(id = "ID")
+  #     } else {
+  #       existID <- input$ID
+  #       choicesID <- getIDChoices()
+  #       if (!all(existID %in% choicesID)) {
+  #         existID <- NULL
+  #       }
+  #       updateSelectInput(session = session, inputId = "ID", choices = choicesID, selected = existID)
+  #       shinyjs::enable(id = "ID")
+  #     }
+  #   }
+  # )
 
-    #set a default value for input$ID and appropriate choices
-    defaultID <- isolate(input$ID)
-    defaultID <- defaultID[defaultID %in% choices & defaultID != ""]
-    if(length(defaultID) == 0) {
-      # choose character or whole_number columns that have 100% uniqueness
-      defaultID <- rownames(ds)[ds$uniqueRatio==1.0 & (ds$wholeNumb | ds$text)]
-      if (length(defaultID) > 1) {
-        defaultID <- defaultID[1]
+  # observe ------------------------------------------------------
+  observe({
+      ds <- getDataSummary()
+      req(ds)
+      choices <- as.list(rownames(ds))
+      names(choices) <- paste0(choices, " [",ds$type,"]")
+      imbalanced <- choices[ds$imbalanceRatio > 1.1]
+      imbalanced[is.na(imbalanced)] <- FALSE
+      ######shinyjs::toggleElement(id = "AddWeights", condition = input$ProbType == "Classification" && input$Target %in% imbalanced)
+      if (input$AddWeights && length(input$BalanceFactors) > 0) {
+        updateSelectInput(session = session, inputId = "Weights", choices = list("Weighting"), selected = "Weighting")
+        shinyjs::disable(id = "Weights")
+      } else {
+        wChoices <- choices[ds$numeric & !ds$binary]
+        wChoices[["none"]] <- ""
+        updateSelectInput(session = session, inputId = "Weights", choices = wChoices, selected = isolate(input$Weights))
+        shinyjs::enable(id = "Weights")
       }
-    }
-    if(length(defaultID) == 0) {
-      best <- unique(c( choices[toupper(choices)=="ID"], choices[ds$text] ))
-      defaultID <- best
-    }
-    if(length(defaultID) == 0) {
-      defaultID <- NULL
-    }
-    updateSelectInput(session = session, inputId = "ID", choices = choices, selected = defaultID)
+      if (input$PreSplit != "") {
+        updateSelectizeInput(session = session, inputId = "Groups", choices = list("none" = ""), selected =  NULL)
+        shinyjs::disable(id = "Groups")
+      } else {
+        gChoices <- choices[(ds$factor | ds$wholeNum) & ds$uniqueness > 5]
+        gChoices[["none"]] <- ""
+        updateSelectizeInput(session = session, inputId = "Groups", choices = gChoices, selected = isolate(input$Groups))
+        shinyjs::enable(id = "Groups")
+      }
+      if (input$AddWeights) {
+        lowCard <- setdiff(choices[ds$uniqueness <= input$Continuous[1] & ds$uniqueness > 1], c(input$PreSplit, input$Groups))
+        updateSelectInput(session = session, inputId = "BalanceFactors", choices = lowCard, selected = isolate(input$BalanceFactors))
+        shinyjs::showElement(id = "BalanceFactors")
+      } else {
+        shinyjs::hideElement(id = "BalanceFactors")
+      }
+      pChoices <- choices[ds$binary | (ds$factor & ds$uniqueness == 2)]
+      pChoices[["none"]] <- ""
+      updateSelectInput(session = session, inputId = "PreSplit", choices = pChoices, selected = isolate(input$PreSplit))
+      ids <- getIDChoices()
+      if (length(ids) == 0) {
+        # updateCheckboxInput(session = session, inputId = "AddIds", value = TRUE)  #triggers before length(ids) has settled down
+      } else if (length(ids) == 1) {
+        updateSelectizeInput(session = session, inputId = "ID", choices = ids, selected = ids[1])
+      } else {
+        updateSelectizeInput(session = session, inputId = "ID", choices = ids, selected = isolate(input$ID), )
+      }
   })
 
-  ###########################################################################
-  observe({
+  # observe event Target ------------------------------------------------------
+  observeEvent(input$Target, {
     ds <- getDataSummary()
-    choices <- rownames(ds)
-    names(choices) <- paste0(choices, " [",ds$type,"]")
-
-    updateSelectInput(session = session, inputId = "Weights", choices = choices[ds$numeric], selected = isolate(input$Weights))
-    updateSelectInput(session = session, inputId = "PreSplit", choices = choices[ds$binary], selected = isolate(input$PreSplit))
-  })
-
-  ###########################################################################
-  observeEvent(input$Class, {
-    ds <- getDataSummary()
-    ds <- ds[rownames(ds) == input$Class, ]
+    ds <- ds[rownames(ds) == input$Target, ]
 
     if (nrow(ds) == 0) {
       ptype <- NA
-    } else if (ds$binary | ds$factor | (ds$wholeNumb & ds$uniqueness < 11) ) { #arbitrary 11 used here
+    } else if (ds$binary | ds$factor | (ds$wholeNumb & ds$uniqueness < getContinuousDebounced()[1]) ) {
       ptype <- "Classification"
     } else if (ds$numeric & ds$uniqueRatio > 0.5) { #arbitrary 50% unique
       ptype <- "Regression"
@@ -367,48 +517,198 @@ shinyServer(function(input, output, session) {
     }
   })
 
-  ###########################################################################
-  observeEvent(input$ProbType, {
-    if (input$ProbType == "Classification") {
-      d <- getData()
-      ds <- getDataSummary()
-      col <- d[,which(colnames(d) == input$Class)]
-      uniqCnt <- length(unique(na.omit(col)))
-      updateRadioButtons(session = session, inputId = "BiClass", selected = ifelse(uniqCnt == 2, "Only", "Avoid"))
-      allPredFactors <- all(ds[rownames(ds) != input$Class, "factor"], drop = TRUE)
-      updateRadioButtons(session = session, inputId = "CatPredictors", selected = ifelse(allPredFactors, "Only", "Avoid"))
-      updateSelectInput(session = session, inputId = "HypMetric", choices = c("Accuracy","Kappa"), selected = "Accuracy")
-    } else if (input$ProbType == "Regression") {
-      updateRadioButtons(session = session, inputId = "BiClass", selected = "Neutral")
-      updateRadioButtons(session = session, inputId = "CatPredictors", selected = "Neutral")
-      updateSelectInput(session = session, inputId = "HypMetric", choices = c("RMSE","Rsquared"), selected = "RMSE")
+  # render plot ClassPieChart ------------------------------------------------------
+  output$ClassPieChart <- renderPlot({
+    d <- getSomeData()
+    req(isRoleValid(input$Target, d))
+    target <- d[,input$Target, drop = TRUE]
+    req(is.factor(target) || is.binary(target))
+    
+    if(isRoleValid(input$Weights, d)) {
+      df <- data.frame(var = target, wt = d[,input$Weights])
+      t <- df %>% dplyr::count(var, wt = wt)
+    } else {
+      df <- data.frame(var = target)
+      t <- df %>% dplyr::count(var)
     }
+    colnames(t)[1] <- "Level"
+    ggplot(data = t, mapping = aes(x = 0, y = n, fill = Level)) +
+      geom_bar(width = 1, stat = "identity") +
+      coord_polar("y") +
+      labs(title = NULL, x = NULL, y = NULL) +
+      theme(axis.text.x = element_blank(),
+            legend.position = "none",
+            axis.ticks = element_blank(),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks.length = unit(0, "mm"),
+            plot.margin = unit(c(0,0,0,0), "mm"),
+            plot.background = element_blank(),
+            legend.spacing = unit(c(0,0,0,0), "mm"),
+            axis.title = element_blank()
+      )
+  }, bg = "transparent")
+
+  # render plot GroupPieChart ------------------------------------------------------
+  output$GroupPieChart <- renderPlot({
+    req(input$Groups != "")
+    d <- getSomeData()
+    column <- d[,input$Groups, drop = TRUE]
+
+    Level <- as.factor(column)
+    t <- table(Level, useNA = "no")
+    df <- as.data.frame(t)
+    ggplot(data = df, mapping = aes(x = 0, y = Freq, fill = Level)) +
+      geom_bar(width = 1, stat = "identity") +
+      coord_polar("y") +
+      labs(title = NULL, x = NULL, y = NULL) +
+      theme(axis.text.x = element_blank(),
+            legend.position = "none",
+            axis.ticks = element_blank(),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks.length = unit(0, "mm"),
+            plot.margin = unit(c(0,0,0,0), "mm"),
+            plot.background = element_blank(),
+            legend.spacing = unit(c(0,0,0,0), "mm"),
+            axis.title = element_blank()
+      )
+  }, bg = "transparent")
+
+  # render plot SplitPieChart ------------------------------------------------------
+  output$SplitPieChart <- renderPlot({
+    d <- getSomeData()
+    req(isRoleValid(input$PreSplit, d))
+    df <- data.frame(var = d[,input$PreSplit])
+    t <- df %>% dplyr::count(var)
+    colnames(t)[1] <- "Level"
+    ggplot(data = t, mapping = aes(x = 0, y = n, fill = Level)) +
+      geom_bar(width = 1, stat = "identity") +
+      coord_polar("y") +
+      labs(title = NULL, x = NULL, y = NULL) +
+      theme(axis.text.x = element_blank(),
+            legend.position = "none",
+            axis.ticks = element_blank(),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks.length = unit(0, "mm"),
+            plot.margin = unit(c(0,0,0,0), "mm"),
+            plot.background = element_blank(),
+            legend.spacing = unit(c(0,0,0,0), "mm"),
+            axis.title = element_blank()
+      )
+  }, bg = "transparent")
+
+  # reactive getNonPredictors ------------------------------------------------------
+  getNonPredictors <- reactive({
+    ignore <- c(input$ID, input$Weights, input$PreSplit, input$HideCol, input$Groups)
+    ignore[ignore != ""]
+  })
+
+  # observe ------------------------------------------------------
+  observe({
+    req(input$Navbar == "DataColumns")
+    d <- getSomeData()
+    req(d)
+    req(isRoleValid(input$Target, d))
+    col <- d[,input$Target, drop = TRUE]
+    type <- class(col)
+    if (isRoleValid(input$Weights, d)) {
+      Xweighted <- "weighted "
+    } else {
+      Xweighted <- ""
+    }
+    uniqCnt <- length(unique(na.omit(col)))
+    if (uniqCnt == 1) {
+       text <- paste("Error: The outcome has constant data.\nIt is not a legitimate outcome variable.")
+    } else if ("Date" %in% type) {
+      text <- paste("Warning: This outcome is a date/time variablea.\nIt is not a legitimate outcome variable.")
+    } else if (is.numeric(col)) {
+      isInt <- is.wholenumber(col)
+      if (isInt & uniqCnt < input$Continuous[1]) {
+        text <- paste("Warning: There are", uniqCnt, "unique integer outcome values.\nTo make a multi-class classification problem you should explicitly change the outcome to a factor")
+      } else if (!isInt & uniqCnt < input$Continuous[2]) {
+        text <- paste("Warning: The outcome has only", uniqCnt, "unique numeric values.\nIt is a dubious outcome variable for regression")
+      } else {
+        text <- paste0("This is a ", Xweighted ," regression problem.")
+      }
+    } else if ("character" %in% type) {
+        text <- paste("Warning: The outcome is textual data and is not a legitimate outcome variable")
+    } else if ("factor" %in% type) {
+      if (uniqCnt == 2 && nrow(d) > 2) {
+        text <- paste0("This is a ", Xweighted ,"binary classification problem.")
+      } else if (uniqCnt > input$Continuous[2]) {
+        text <- paste("Error: The outcome has", uniqCnt, "factor levels.\nIt is not a legitimate outcome variable for classification.")
+      } else if (uniqCnt > input$Continuous[1]) {
+        text <- paste("Warning: The outcome has", uniqCnt, "factor levels.\nIt is a dubious outcome variable for classification.")
+      } else {
+        text <- paste0("This is a ", Xweighted ,"multinomial classification problem with ",uniqCnt," levels.")
+      }
+    } else {
+      text <- paste0("Error: The outcome type is '", type,"'.\nIt is not a legitimate outcome variable.")
+    }
+    targetMessage <- text
+    output$TargetCheck <- renderInfoBox({
+      infoBox(title = "Outcome", value = targetMessage, icon = icon("bullseye"), color = DATAColour, fill = TRUE)
+    })
+
+    predCount <- length(setdiff(colnames(d), c(input$Target, getNonPredictors())))
+    output$PredictorCount <- renderInfoBox({
+      infoBox(title = "Predictors", value = predCount, icon = icon("columns"), color = DATAColour, fill = TRUE)
+    })
+    ds <- getDataSummary()
+    ds <- ds[!rownames(ds) %in% getNonPredictors(),]
+    cont <- getContinuousDebounced()
+    possCard <- sum(ds$uniqueness > cont[1] & ds$uniqueness <= cont[2] & (ds$text | ds$factor))
+    highCard <- sum(ds$uniqueness > cont[2] & (ds$text | ds$factor))
+    output$StringCount <- renderInfoBox({
+      infoBox(title = "High Cardinality", value = paste0("Certain ", highCard, ",  Possible ", possCard), icon = icon("layer-group"), color = DATAColour, fill = TRUE)
+    })
+
+    countnzv <- sum(ds$nzv & !rownames(ds) %in% getNonPredictors())
+    output$NZVCount <- renderInfoBox({
+      infoBox(title = "Near-Zero Var.", value = countnzv, icon = icon("adjust"), color = DATAColour, fill = TRUE)
+    })
+
+    ds <- ds[(ds$numeric | ds$date),]
+    possCont <- sum(ds$uniqueness > cont[1] & ds$uniqueness <= cont[2])
+    certainCont <- sum(ds$uniqueness > cont[2])
+    output$ContCount <- renderInfoBox({
+      infoBox(title = "Continuous", value = paste0("Certain ", certainCont, ",  Possible ", possCont), icon = icon("sort-amount-down"), color = DATAColour, fill = TRUE)
+    })
   })
 
   ###########################################################################
-  output$YSummary <- renderText({
-    req(input$Class)
+  output$TargetCheck <- renderInfoBox({
     d <- getSomeData()
-    col <- d[,which(colnames(d) == input$Class)]
+    req(isRoleValid(input$Target, d))
+
+    col <- d[,input$Target, drop = TRUE]
     type <- class(col)
     uniqCnt <- length(unique(na.omit(col)))
 
-    if ("numeric" %in% type) {
-      isInt <- all(unlist(lapply(col, FUN = is.wholenumber)))
+    if (is.numeric(col)) {
+      isInt <- is.wholenumber(col)
       if (isInt & uniqCnt == 2 & nrow(d) > uniqCnt) {
-        text <- paste("Since there are only", uniqCnt, "unique integer Y values, this is a binary classification problem we are looking at.")
+        text <- paste("Since there are only", uniqCnt, "unique integer Y values, this is a binary classification problem.")
       } else if (isInt & uniqCnt < 11 & nrow(d) > uniqCnt) { #arbitrary 11 used here
-        text <- paste("Warning: Since there are", uniqCnt, "unique integer Y values, this is a multinomial classification problem we are looking at.\nTo make this explicit you may choose to make this column a factor")
+        text <- paste("Warning: Since there are", uniqCnt, "unique integer Y values, this might be a multi-class classification problem.\nTo make this explicit you may choose to make this column a factor")
       } else if (uniqCnt == 1) {
         text <- paste("Error: This column has constant data and should be removed. It is not a legitimate target variable.")
       } else if (!isInt & uniqCnt/nrow(d) < 0.5) { #arbitrary 0.5 used here
-        text <- paste("Warning: A column with only", paste0(round(uniqCnt/nrow(d)*100),"%"), "unique numeric values is a suspicious dependent variable for regression")
+        text <- paste("Warning: A column with only", paste0(ceiling(uniqCnt/nrow(d)*100),"%"), "unique numeric values is a suspicious outcome variable for regression")
       } else {
         text <- paste("This is a regression problem.")
       }
     } else if ("character" %in% type) {
       if (uniqCnt == nrow(d)) {
-        text <- paste("Warning: This column has text data and should be removed or used as a row identifier")
+        text <- paste("Warning: This column effectively has text data and should be encoded or used as a row identifier")
       } else {
         text <- paste("Warning: This column has text data and should be removed or used as a partial row identifier")
       }
@@ -416,94 +716,261 @@ shinyServer(function(input, output, session) {
       if (uniqCnt == 2 & nrow(d) > uniqCnt) {
         text <- paste("This is a binary classification problem.")
       } else if (uniqCnt == nrow(d) ) {
-        text <- paste("Error: This column effectively has unique text in each row and should be removed or used as a row identifier. It is not a legitimate target variable.")
+        text <- paste("Error: This column effectively has unique text in each row and should be removed or used as a row identifier. \nIt is not a legitimate target variable.")
       } else if (uniqCnt/nrow(d) > 0.3) { #arbitrary 0.3 used here
-        text <- paste("Warning: There are", uniqCnt, "unique Y levels, that is", paste0(round(uniqCnt/nrow(d)*100),"%"),"of the rows. This is a suspicious dependent variable for classification")
+        text <- paste("Warning: There are", uniqCnt, "unique Y levels, that is", paste0(ceiling(uniqCnt/nrow(d)*100),"%"),"of the rows. \nThis is a suspicious outcome variable for classification")
       } else if (uniqCnt == 1) {
         text <- paste("Error: This column has constant data and should be removed. It is not a legitimate target variable.")
       } else {
-        text <- paste("This is a multinomial (",uniqCnt," levels) classification problem.")
+        text <- paste0("This is a multinomial (",uniqCnt," levels) classification problem.")
       }
     } else if ("Date" %in% type) {
-      text <- paste("Warning: This column has date/time data and should be removed or used as a row identifier. It is not a legitimate target variable.")
+      text <- paste("Warning: This column has date/time data and should be removed or used as a row identifier. \nIt is not a legitimate outcome variable.")
     } else {
-      text <- paste("Error: The type is", type,". It is not a legitimate target variable.")
+      text <- paste0("Error: The type is '", type,"'. It is not a legitimate outcome variable.")
     }
-    text
+    infoBox(title = "Outcome", value = text, icon = icon("bullseye"), color = DATAColour, fill = TRUE)
   })
 
   ###########################################################################
-  output$DataIssues <- renderText({
-    d <- getRawData()
-    ds <- getRawDataSummary()
+  output$Ratio <- renderInfoBox({
+    d <- getSomePredictorData()
+    count <- length(colnames(d)) - ifelse(isRoleValid(input$Target, d), 1, 0)
+    rows <- nrow(getData())
+    text <- paste0("Observations ", rows,", Predictors ",count, ", Ratio of Obs/Pred ", round(rows/count,1))
+    infoBox(title = "Ratio", value = text, icon = icon("balance-scale-right"), color = DATAColour, fill = TRUE)
+  })
 
-    dn <- d[,ds$numeric]
-    NZV <- caret::nearZeroVar(dn, names = TRUE)
-    text <- c()
-    if(length(NZV) > 0) {
-      text <- c(text, paste("The following numeric variables suffer from Near Zero Variance:",paste0(NZV, collapse=", ")))
+  ###########################################################################
+  output$StringCount <- renderInfoBox({
+    ds <- getDataSummary()
+    ds <- ds[!rownames(ds) %in% getNonPredictors(),]
+    cont <- getContinuousDebounced()
+    poss <- sum(ds$uniqueness > cont[1] & ds$uniqueness <= cont[2] & (ds$text | ds$factor))
+    high <- sum(ds$uniqueness > cont[2] & (ds$text | ds$factor))
+    infoBox(title = "High Cardinality", value = paste0("Certain ", high, ",  Possible ", poss), icon = icon("layer-group"), color = DATAColour, fill = TRUE)
+  })
+
+  ###########################################################################
+  output$NZVCount <- renderInfoBox({
+    ds <- getDataSummary()
+    count <- sum(ds$nzv & !rownames(ds) %in% getNonPredictors())
+    infoBox(title = "Near-Zero Var.", value = count, icon = icon("adjust"), color = DATAColour, fill = TRUE)
+  })
+
+  ###########################################################################
+  output$ContCount <- renderInfoBox({
+    ds <- getDataSummary()
+    ds <- ds[!rownames(ds) %in% getNonPredictors() & (ds$numeric | ds$date),]
+    cont <- getContinuousDebounced()
+    poss <- sum(ds$uniqueness > cont[1] & ds$uniqueness <= cont[2])
+    certain <- sum(ds$uniqueness > cont[2])
+    infoBox(title = "Continuous", value = paste0("Certain ", certain, ",  Possible ", poss), icon = icon("sort-amount-down"), color = DATAColour, fill = TRUE)
+  })
+
+  ###########################################################################
+  output$MissObs <- renderInfoBox({
+    d <- getSomePredictorData() # avoid the hidden vars
+    req(d)
+    m <- sum(base::apply(X = d, MARGIN = 1, FUN = function(x) any(is.na(x))))
+    some <- round(m / dim(d)[1] * 100, 1)
+    rows <- base::apply(X = d, MARGIN = 1, FUN = function(x) sum(is.na(x))) / ncol(d)
+    cnt <- sum(rows > input$MissObsThreshold / 100)
+    heavy <- round(cnt / nrow(d) * 100, 1)
+    infoBox(title = "Missing Observations", value = paste0("Heavy ", heavy, "%,  Some ", some, "%"), icon = icon("align-justify"), color = DATAColour, fill = TRUE)
+  })
+
+  ###########################################################################
+  output$MissVar <- renderInfoBox({
+    d <- getSomePredictorData()
+    req(d)
+    some <- sum(base::apply(X = d, MARGIN = 2, FUN = function(x) any(is.na(x))))
+    ds <- getDataSummary()
+    cols <- ds$missingRate > input$MissVarThreshold / 100
+    heavy <- sum(cols)
+    infoBox(title = "Missing Predictor Variables", value = paste0("Heavy ", heavy, ",  Some ", some), icon = icon("columns"), color = DATAColour, fill = TRUE)
+  })
+
+  ###########################################################################
+  output$MissTarget <- renderInfoBox({
+    d <- getSomeData()
+    req(d)
+    req(isRoleValid(input$Target, d))
+    some <- round(sum(is.na(d[,input$Target])) / nrow(d) * 100, 1)
+    infoBox(title = "Missing Outcome Variable", value = paste0(some,"%"), icon = icon("exclamation-triangle"), color = DATAColour, fill = TRUE)
+  })
+
+  ###########################################################################
+  output$DataSummary <- renderUI({
+    Data <- getSomeData()
+    summary <- summarytools::dfSummary(Data, graph.magnif = 1.5)
+    summarytools::view(summary, 
+                       method = 'render',
+                       report.title = NA,
+                       headings = FALSE,
+                       bootstrap.css = FALSE,
+                       footnote = NA,
+                       max.tbl.height = 600,
+                       collapse = TRUE,
+                       silent = TRUE
+    )
+  })
+
+  ###########################################################################
+  # missingChart <- function(data, minimal = TRUE, sort = NULL, title = "Missing values", xlab = "Observations") {
+  #   if (length(sort) > 0 && all(sort %in% colnames(data))) {
+  #     data <- data[order(data[,sort]), ]
+  #     xlab = paste(xlab, "in", paste0(sort, collapse = ","), "order")
+  #   } else {
+  #     xlab = paste(xlab, "in natural order")
+  #   }
+  #   data <- dplyr::mutate_all(data, .fun = is.na)
+  #   if (minimal) {
+  #     someMissing <- base::apply(X = data, MARGIN = 2, FUN = any)
+  #     if (any(someMissing)) {
+  #       data <- data[, someMissing, drop = FALSE]
+  #     }
+  #   }
+  #   data$Sequence <- 1:nrow(data)
+  #   plot_df <- tidyr::pivot_longer(data, -Sequence,  names_to = "Variable", values_to = "Missing")
+  # 
+  #   names <- rev(colnames(data))
+  #   ggplot(plot_df, aes(x = Sequence, y = Variable, fill = Missing)) + 
+  #     geom_raster() +
+  #     labs(x = xlab, title = title, y = "Variable")
+  # }
+
+  ###########################################################################
+  output$MissingChart1 <- renderPlotly({
+    data <- getSomeData()
+    req(ncol(data) > 0)
+    sort = input$SortOrder
+    if (length(sort) > 0 && all(sort %in% colnames(data))) {
+      data <- data[order(data[,sort]), ]
+      ylab = paste("Observations in", paste0(sort, collapse = ","), "order")
+    } else {
+      ylab = "Observations in natural order"
     }
-
-    NZVf <- c()
-    df <- d[,ds$factor]
-    for(col in colnames(df)) {
-      if (nzvf(df[,col, drop=TRUE])) {
-        NZVf <- c(NZVf, col)
+    if (input$HideIrrelevant) {
+      colCounts <- base::colSums(is.na(data))
+      if (any(colCounts > 0)) {
+        data <- data[, colCounts > 0, drop = FALSE]
       }
     }
-    if(length(NZVf) > 0) {
-      text <- c(text, paste("The following factor variables suffer from Near Zero Variance:",paste0(NZVf, collapse=", ")))
-    }
+    plot <- visdat::vis_miss(data, cluster = FALSE, sort_miss = FALSE, show_perc = TRUE) +
+      labs(x = "Variables", title = "Missing values throughout the data", y = ylab) +
+      coord_flip()
+    plotly(plot, tooltip = c("variable", "value"))
+  })
+  
+  ###########################################################################
+  output$MissingChart2 <- renderPlot({
+    d <- getSomeData()
+    req(ncol(d) > 0)
+    missingCounts(d)
+  }, bg = "transparent")
 
-    text <- c()
-    if(length(NZV) > 0) {
-      text <- c(text, paste("The following variables suffer from Near Zero Variance:",paste0(NZV, collapse=", ")))
-    }
-
-
-    combos <- caret::findLinearCombos(na.omit(dn))
-    if (length(combos) > 0 && length(combos$remove) > 0) {
-      text <- c(text, paste("The following variables are possibly redundant due to correlation:", paste0(colnames(dn)[combos$remove], collapse=", ")))
-    }
-
-    NAM <- colnames(d)[ds["missingRate"] > 0.5]
-    if (length(NAM) > 0) {
-      text <- c(text, paste("The following variables suffer from excessive missing values:", paste0(NAM, collapse=", ")))
-    }
-
-    NotContinuous <- colnames(d)[ds["uniqueRatio"] < 0.3 & ds["wholeNumb"]]
-    if (length(NotContinuous) > 0) {
-      text <- c(text, paste("The following variables suffer from being non-continuous integer variables:", paste0(NotContinuous, collapse=", ")))
-    }
-
-    Continuous <- colnames(d)[ds["uniqueRatio"] > 0.9 & ds["factor"]]
-    if (length(Continuous) > 0) {
-      text <- c(text, paste("The following variables suffer from being near-continuous factor variables:", paste0(Continuous, collapse=", ")))
-    }
-
-    NZVF <- colnames(d)[ds["uniqueRatio"] > 0.9 & ds["factor"]]
-    if (length(Continuous) > 0) {
-      text <- c(text, paste("The following variables suffer from being near-continuous factor variables:", paste0(Continuous, collapse=", ")))
-    }
-
-
-    paste(text, collapse = "\n\n")
+  ###########################################################################
+  output$MissObservations <- renderText({
+    d <- getData()
+    # remove unwanted columns
+    m <- sum(base::apply(X = d, MARGIN = 1, FUN = function(x) any(is.na(x))))
+    paste0(m, " (", round(m / dim(d)[1] * 100), "%)")
   })
 
   ###########################################################################
-  output$RawDataSummary <- renderUI({
-    print(summarytools::dfSummary(getSomeRawData()),
-          method = 'render',
-          omit.headings = TRUE,
-          bootstrap.css = FALSE)
+  output$MissVariables <- renderText({
+    d <- getData()
+    # remove unwanted columns
+    m <- sum(base::apply(X = d, MARGIN = 2, FUN = function(x) any(is.na(x))))
+    paste0(m, " (", round(m / dim(d)[2] * 100), "%)")
+  })
+
+  
+  ###########################################################################
+  output$MissValues <- renderText({
+    d <- getData()
+    # remove unwanted columns
+    m <- sum(is.na(d))
+    paste0(m, " (", round(m / dim(d)[1] / dim(d)[2] * 100), "%)")
+  })
+
+  # reactive function getMissObsRatios ####
+  getMissObsRatios <- reactive({
+    d <- getData()
+    base::apply(X = d, MARGIN = 1, FUN = function(x) sum(is.na(x))) / ncol(d)
+  })
+  
+  ###########################################################################
+  output$HeavyMissObs <- renderText({
+    cnt <- sum(getMissObsRatios() > input$MissObsThreshold / 100)
+    prop <- cnt / nrow(getData()) * 100
+    paste0(cnt, " (", round(prop,1), "%)")
   })
 
   ###########################################################################
-  output$MissingChart <- renderPlot({
-    naniar::vis_miss( getSomeData() ) +
-#      coord_flip() +
-      ggtitle("Missing Value Distribution") +
-      theme(plot.title = element_text(lineheight=1, face="bold", hjust = 0.5))
+  output$HeavyMissVar <- renderText({
+    d <- getData()
+    ds <- getDataSummary()
+    cols <- ds$missingRate > input$MissVarThreshold / 100
+    cnt <- sum(cols)
+    prop <- cnt / ncol(d) * 100
+    paste0(cnt, " (",round(prop,1), "%)")
+  })
+
+  ###########################################################################
+  getTrainedModels <- reactive({
+    req(length(react$ModelSet) >= 1)
+    bad <- unlist(lapply(react$ModelSet, FUN = inherits, what = c("character")))
+    req(sum(!bad) > 0)
+    react$ModelSet[!bad]
+  })
+  
+  ###########################################################################
+  getTimings <- reactive({
+    d <- getTrainData()
+    thousand <- sample(nrow(d), size = 1000, replace = TRUE)
+    d <- d[thousand, ]
+    timing <- c()
+    for (mod in getTrainedModels()) {
+      t <- system.time({
+        try({
+          predict(mod, newdata = d)
+        }, silent = TRUE)
+      })
+      timing <- c(timing, t[1])
+    }
+    timing
+  })
+  
+  ###########################################################################
+  getResampledModels <- reactive({
+    mods <- getTrainedModels()
+    req(mods)
+    for (i in seq(mods)) {
+      if (is(mods[[i]], "caretStack")) {
+        mods[[i]] <- mods[[i]]$ens_model
+      }
+    }
+    res <- try({
+      resamples(mods)
+    }, silent = FALSE)
+    req(is(res, "resamples"))
+
+    if (!input$HideTimings) {
+      #Add timings to the metrics
+      timings <- getTimings()
+      df <- res$values
+      origNames <- colnames(df)
+      res$metrics[length(res$metrics) + 1] <- "logTiming"
+      for (m in 1:length(res$models)) {
+        timing <- rep(log10(timings[m]), times = nrow(df))
+        df <- cbind(df, timing)
+      }
+      colnames(df) <- c(origNames, paste(sep = "~", res$models, "logTiming"))
+      res$values <- df
+    }
+    res
   })
 
   ###########################################################################
@@ -514,11 +981,46 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
-  output$RisingChart <- renderPlot({
+  getSomeDefinitelyContinuousData <- reactive({
     d <- getSomeData()
     ds <- getDataSummary()
-    d <- d[, ds$uniqueRatio > input$Continuous & ds$numeric, drop = FALSE]  # filter out non-continuous columns
+    # need to remove special roles and restrict to numeric
+    d <- d[, ds$uniqueness >= (getContinuousDebounced()[2]) & ds$numeric, drop = FALSE]
+    d[, setdiff(colnames(d), getNonPredictors()), drop = FALSE]
+  })
+
+  ###########################################################################
+  getSomePossiblyContinuousData <- reactive({
+    d <- getSomeData()
+    ds <- getDataSummary()
+    # need to remove special roles and restrict to numeric
+    d <- d[, ds$uniqueness >= (getContinuousDebounced()[1]) & ds$numeric, drop = FALSE]
+    d[, setdiff(colnames(d), getNonPredictors()), drop = FALSE]
+  })
+
+  ###########################################################################
+  getSomeDefinitelyDiscontData <- reactive({
+    d <- getSomeData()
+    ds <- getDataSummary()
+    # need to remove special roles and restrict to numeric
+    d <- d[, ds$uniqueness <= (getContinuousDebounced()[1]), drop = FALSE]
+    d[, setdiff(colnames(d), getNonPredictors()), drop = FALSE]
+  })
+
+  ###########################################################################
+  getSomePossiblyDiscontData <- reactive({
+    d <- getSomeData()
+    ds <- getDataSummary()
+    # need to remove special roles
+    d <- d[, ds$uniqueness <= (getContinuousDebounced()[2]), drop = FALSE]
+    d[, setdiff(colnames(d), getNonPredictors()), drop = FALSE]
+  })
+
+  ###########################################################################
+  output$RisingChart <- renderPlotly({
+    d <- getSomePossiblyContinuousData()
     req(ncol(d) > 0)  # exit if no numeric columns
+    ds <- getDataSummary()
     # the for-loop below can be rewritten as an Xapply() type of operation (feel free to do this if it bothers you)
     for (col in 1:ncol(d)) {
       d[,col] <- d[order(d[,col]),col]
@@ -526,378 +1028,1163 @@ shinyServer(function(input, output, session) {
     if (input$ScaleChart) {
       d <- scale(x = d, center = TRUE, scale = TRUE)
     }
-    mypalette <- rainbow(ncol(d))
-    p <- matplot(y = d, type = "l", xlab = "observations", ylab="Values", lty = 1, lwd=1, col = mypalette, main="Rising Order chart of continuous variables")
-    if (input$ShowLegend) {
-      legend(legend = colnames(d), x = "top", y = "top", lty = 1, lwd = 1, col = mypalette, ncol = round(ncol(d)^0.3))
-    }
-    p
-  })
+    d <- as.data.frame(d)
+    d$DummyID <- 1:nrow(d)
 
-  ###########################################################################
-  output$NaturalOrderChart <- renderPlot({
-    d <- getContData()
-    req(ncol(d) > 0)  # exit if no numeric columns
-    if (input$ScaleChart) {
-      d <- scale(x = d, center = TRUE, scale = TRUE)
-    }
-    mypalette <- rainbow(ncol(d))
-    p <- matplot(y = d, type = "l", xlab = "observations", ylab = "Values", lty = 1, lwd = 1, col = mypalette, main = "Natural Order chart of numerical variables")
-    if (input$ShowLegend) {
-      legend(legend = colnames(d), x = "top", y = "top", lty = 1, lwd = 1, col = mypalette, ncol = round(ncol(d)^0.3))
-    }
-    p
-  })
-
-  ###########################################################################
-  getNumData <- reactive({
-    d <- getData()
-    types <- allClass(d) %in% c("numeric","integer")
-    if (any(types)) {
-      d[,which(types), drop = FALSE]
-    } else {
-      data.frame()
-    }
-  })
-
-  ###########################################################################
-  getContData <- reactive({
-    d <- getData()
-    ds <- getDataSummary()
-    d[, ds$uniqueRatio > input$Continuous & ds$numeric, drop = FALSE]
-  })
-
-  ###########################################################################
-  getFactData <- reactive({
-    d <- getData()
-    ds <- getDataSummary()
-    noncontNames <- colnames(d)[ds$uniqueRatio < input$Continuous & ds$numeric]
-    for(col in noncontNames) {
-      d[,col] <- as.factor(d[,col])
-    }
-    d[, factorNames(d), drop = FALSE]
-  })
-
-  ###########################################################################
-  output$NumericNovelties <- renderPlot({
-    #Boxplots (and outliers) are only meaningful for continuous data
-    d <- getContData()
-    req(ncol(d) > 0)
-    xlab <- "Variable value"
-    if (input$ScaleChart) {
-      d <- scale(d, center = TRUE, scale = TRUE)
-      xlab <- "Standardised variable value"
-    }
-
-    prob <- c()
-    for (col in 1:ncol(d)) {
-      stats <- boxplot.stats(x = d[,col], coef = input$Multiplier)
-      if (!input$BoxPlotNovelties || length(stats$out) > 0) {
-        prob <- c(prob, col)
-      }
-    }
-    d <- d[, prob, drop = FALSE]
-    req(ncol(d) > 0)
-    if (ncol(d) == 1) {
-      ylab <- colnames(d)
-    } else {
-      ylab <- NULL
-    }
-
-    par(mar = c(1,15,1,1))
-    boxplot(d, range = input$Multiplier, main = paste("Continuous Univariate Novelties at IQR multiplier of", input$Multiplier),
-            outpch = 21, outcol = "pink", outbg = "red", las = 1, horizontal = TRUE, ylab = ylab, boxwex = 0.5)
-    if (ncol(d) == 1){
-      axis(1, labels=colnames(d), at=1, las=1)
-    }
-  })
-
-  ###########################################################################
-  output$NumNoveltyTable <- renderDataTable({
-    d <- getContData()
-    req(ncol(d) > 0)
-    if (input$ScaleChart) {
-      d <- scale(d, center = TRUE, scale = TRUE)
-    }
-    out <- vector(mode = "logical", length = nrow(d))
-    for (col in 1:ncol(d)) {
-      q <- quantile(d[,col], c(1,3)/4, na.rm = TRUE)
-      iqr <- q[2]-q[1]
-      lbound <- q[1] - input$Multiplier * iqr
-      ubound <- q[2] + input$Multiplier * iqr
-      out <- out | d[,col] < lbound | d[,col] > ubound
-    }
-    novelties <- getData()[out,]
-    DT::datatable(data = novelties, caption = paste("Continuous Univariate Novelty Observations at IQR multiplier of", input$Multiplier))
+    melted <- reshape2::melt(d, id = "DummyID")
+    p <- ggplot(melted, aes_string(x = "DummyID", y = "value", colour = "variable")) +
+      geom_line() +
+      labs(title = "Rising Value Chart - Looking for discontinuities", x = "Observations in ascending value order",
+           subtitle = paste("Numeric variables with number of unique values above", getContinuousDebounced()[1]))
+    plotly(p, tooltip = c("variable", "value"))
   })
 
   ###########################################################################
   observe({
-    d <- getContData()
+    ds <- getDataSummary()
+    req(ncol(ds) > 0)
+    choices <- rownames(ds)
+    names(choices) <- paste0(choices, " [",ds$type,"]")
+    choices <- choices[ds$date | ds$text]
+    if (length(input$ID) > 0) {
+      choices <- union(input$ID, choices)
+    }
+    updateSelectInput(session = session, inputId = "SortOrder", choices = as.list(choices), selected = input$ID)
+  })
+
+  # reactive Cols #### ------------------------------------------------------
+  Cols <- reactive({
+    input$Cols
+  })
+  getColsDebounced <- debounce(Cols, millis = 1000)
+  
+  ###########################################################################
+  getSequenceList <- reactive({
+    d <- getSomeData()
+    if (is.null(input$SortOrder) | input$SortOrder == "") {
+      showNotification(ui = "No sort order defined. Ensure an ID column is available", type = "warning")
+      req(FALSE)
+    }
+    req(all(input$SortOrder %in% colnames(d)))
+    #work-around for bug in tabplot which prohibits date columns as sortCol parameters
+    for (col in input$SortOrder) {
+      if (is(d[, col, drop = TRUE], "Date")) {
+        d[,col] <- as.character(d[, col, drop = TRUE])
+      }
+    }
+    tabplot::tableplot(d, sortCol = input$SortOrder, decreasing = FALSE, nCols = getColsDebounced(), plot = FALSE)
+  })
+
+  ###########################################################################
+  output$SequenceChart1 <- renderPlot({
+    plist <- getSequenceList()
+    if (is(plist,"list")) {
+      i <- 1
+      req(length(plist) >= i)
+      plot(plist[[i]])
+    } else {
+      plot(plist)
+    }
+  }, bg = "transparent")
+
+  ###########################################################################
+  output$SequenceChart2 <- renderPlot({
+    plist <- getSequenceList()
+    req(is(plist,"list"))
+    i <- 2
+    req(length(plist) >= i)
+    plot(plist[[i]])
+  }, bg = "transparent")
+
+  ###########################################################################
+  output$SequenceChart3 <- renderPlot({
+    plist <- getSequenceList()
+    req(is(plist,"list"))
+    i <- 3
+    req(length(plist) >= i)
+    plot(plist[[i]])
+  }, bg = "transparent")
+
+  ###########################################################################
+  output$SequenceChart4 <- renderPlot({
+    plist <- getSequenceList()
+    req(is(plist,"list"))
+    i <- 4
+    req(length(plist) >= i)
+    plot(plist[[i]])
+  })
+
+  ###########################################################################
+  output$SequenceChart5 <- renderPlot({
+    plist <- getSequenceList()
+    req(is(plist,"list"))
+    i <- 5
+    req(length(plist) >= i)
+    plot(plist[[i]])
+  }, bg = "transparent")
+
+  ###########################################################################
+  getVarImp <- reactive({
+    sd <- getSomeData()
+    req(isRoleValid(input$Target, sd))
+    if (isRoleValid(input$Weights, sd)) {
+      w <- sd[,input$Weights]
+    } else {
+      w <- NULL
+    }
+    ds <- getDataSummary()
+    predictors <- colnames(sd)[!colnames(sd) %in% getNonPredictors() & !ds$text]
+    d <- sd[, predictors]
+    showNotification(id = "varimp", ui = "Calculating variable importance using Random Forest", duration = NULL)
+    form <- paste0(input$Target, "~.")
+    parallelMode <- isolate(input$Parallel)
+    obj <- NA
+    if (parallelMode) {
+      obj <- startParallel("varimp")
+    }
+    rfx <- try({
+      trc <- getTrainControl()
+      trc$index <- NULL
+      trc$method <- "cv"  # for performance use oob which is specific to rf
+      trc$number = 10
+      caret::train(form = as.formula(form), data = d, method = "rf", trControl = trc, weights = w, na.action = na.exclude)
+    }, silent = TRUE)
+
+    if (parallelMode) {
+      response <- stopParallel(obj)
+    }
+    removeNotification(id = "varimp")
+    if (is(rfx, "try-error")) {
+      response <- rfx[[1]]
+    }
+    if (is(rfx, "try-error") | is.null(rfx)) {
+      shinyalert::shinyalert(title = "Variable Importance", text = response)
+      return(NULL)
+    }
+    vi <- varImp(rfx)$importance
+    vi2 <- vi[, ncol(vi), drop = TRUE]  # use the last column if there is more than 1  - review this
+    names(vi2) <- rownames(vi)
+    sort(vi2, decreasing = TRUE)
+  })
+
+  ###########################################################################
+  getVarUniOutliers <- reactive({
+    d <- getSomePredictorData()
+    nd <- ncol(d)
+    outliers <-  rep(0, times = nd)
+
+    rec <- recipes::recipe(~., data = d)
+    if (input$UseYJ) {
+      rec <- recipes::step_YeoJohnson(rec, all_numeric(), num_unique = 10)
+    }
+    if (input$ScaleChart) {
+      rec <- recipes::step_center(rec, all_numeric()) %>%
+        recipes::step_scale(all_numeric())
+    }
+    rec <- recipes::prep(rec, data = d, retain = TRUE)
+    d <- recipes::juice(rec, composition = "data.frame")
+
+    for (col in 1:nd) {
+      column <- na.omit(d[, col, drop = TRUE])
+      uniqueness <- length(unique(column))
+      if (is(column, "numeric") & uniqueness >= getContinuousDebounced()[2]) {  # use definitely continuous
+        stat <- boxplot.stats(x = column, coef = input$Multiplier, do.out = TRUE)
+        outliers[col] <- length(stat$out)
+      }
+    }
+    names(outliers) <- colnames(d)
+    outliers
+  })
+
+  ###########################################################################
+  output$NoveltyColumns <- renderPlotly({
+    ds <- getDataSummary()
+    leaveOut <- getNonPredictors()
+    ds <- ds[!rownames(ds) %in% leaveOut,]
+    cont <- getContinuousDebounced()
+    contLev <- ifelse(ds$numeric, 0.4 * (pmax((cont[2] - ds$uniqueness), 0)), NA)
+    factLev <- ifelse(ds$factor, 0.4 * pmax(ds$uniqueness - cont[1], 0), NA)
+    NearZeroVar <- ifelse(ds$nzv, 0.2 * ds$notMissing, ifelse(ds$constant, 0.2 * ds$notMissing, NA))
+    df1 <- data.frame(ContLevels  = input$ConsiderCont * contLev,
+                      NominalLev  = input$ConsiderNom  * factLev,
+                      Missingness = input$ObserveMiss  * ds$missing,
+                      NearZeroVar = input$ConsiderNZV  * NearZeroVar,
+                      Outliers    = input$ConsiderOut  * getVarUniOutliers(),
+                      Variable    = rownames(ds),
+                      row.names   = rownames(ds))
+    vars <- c("ContLevels", "NominalLev", "Missingness", "NearZeroVar", "Outliers")
+    df1 <- df1[,c("Variable", vars)]
+    if (input$MergeVarImp && input$Target != "") {
+      vi = getVarImp()
+      if (!is.null(vi)) {
+        vidf <- data.frame(Importance = vi, Variable = names(vi))
+        df1 <- join(df1, vidf, by = "Variable")
+        df1[,vars] <- df1[,vars] * df1$Importance
+        df1$Importance <- NULL
+      }
+    }
+    df <- tidyr::gather(data = df1, key = "Type", value = "Novelty", -Variable, na.rm = TRUE)
+    df$Variable <- reorder(df$Variable, -df$Novelty, FUN = sum)
+    p <- ggplot(data = df, aes(x = Variable, y = Novelty, fill = Type)) +
+      geom_bar(position = "stack", stat = "Identity") +
+      labs(title = "Novelty of variables", x = "Variable", y = "Novelty") +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+            axis.line.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank())
+    plotly(p)
+  })
+
+  ###########################################################################
+  getObsUniOutliers <- reactive({
+    data <- getSomeDefinitelyContinuousData()
+    if (input$UseYJ) {
+      mod <- caret::preProcess(data, method = c("YeoJohnson"))
+      data <- predict(mod, data)
+    }
+    counts <- rep(0, nrow(data))
+    for (col in 1:ncol(data)) {
+      out <- IqrOutliers(x = data[,col], coef = getMultiplier())
+      counts[out] <- counts[out] + 1
+    }
+    counts / ncol(data) * 10
+  })
+
+  ###########################################################################
+  getMahalanobis2 <- reactive({
+    data <- getSomePossiblyContinuousData()
+    steps <- c("zv", "medianImpute")
+    if (input$UseYJ) {
+      steps <- c(steps, "YeoJohnson")
+    }
+
+    mod <- caret::preProcess(x = data, method = steps)
+    data <- predict(mod, data)
+
+    # if (input$UseDummy) {
+    #   mod <- caret::dummyVars(formula = ~ ., data = data, fullRank = TRUE)
+    #   data <- predict(mod, data)
+    # } else {
+    #   data <- data[, numericNames(data)]
+    # }
+
+    #since the steps below involve matrix inversion we must have full rank
+    badCols  <- caret::findLinearCombos(x = data)$remove
+    if (length(badCols) > 0) {
+      data <- data[, -badCols]
+    }
+
+    rn <- rownames(data)
+    nvar <- ncol(data)
+    if (nvar == 0) {
+      showNotification(ui = "There are no continuous numeric variables", type = "warning")
+    }
+    req(nvar > 0)
+    if (!is.matrix(data)) {
+      data <- as.matrix(data)
+    }
+    Sx <- cov(data, use = "pairwise")
+    diag(Sx) <- diag(Sx) - 1e-10 * max(Sx) # add a ridge for computational stability
+    MD2 <- stats::mahalanobis(x = data, center = colMeans(data, na.rm = TRUE), cov = Sx)
+    names(MD2) <- rn
+    list(MD2 = MD2, nvar = nvar)
+  })
+
+
+  ###########################################################################
+  getLOF <- reactive({
+    Rlof::lof(data = getSomePossiblyContinuousData(), method = input$DistanceMethod, k = input$Klof)
+  })
+
+  ###########################################################################
+  output$NoveltyObservations <- renderPlotly({
+    data <- getSomePredictorData()
+    missing <- apply(data, MARGIN = 1, FUN = function(x) { sum(is.na(x)) })
+    md2 <- getMahalanobis2()
+    df1 <- data.frame(`Missingness` = input$ObserveMiss * 2 * missing / ncol(data),
+                      `Multivar.Outlier` = input$ObserveMvOut * md2$MD2/qchisq(p = 0.95, df = md2$nvar),
+                      `Univar.Outlier` = input$Observe1DOut * getObsUniOutliers(),
+                      `Local.Outlier` = 1 * getLOF(),
+                      `Observation` = rownames(data),
+                      row.names = rownames(data))
+    vars <- c("Missingness", "Multivar.Outlier", "Univar.Outlier","Local.Outlier")
+    if (input$MergeWeighting && input$Weights %in% colnames(data)) {
+      df1[, vars] <- df1[,vars] * data[, input$Weights]
+    }
+    novsum <- base::apply(X = df1[, vars], MARGIN = 1, FUN = sum)
+    df1 <- df1[ order(novsum, decreasing = TRUE)[1:min(c(100, nrow(df1)))], ]
+    d <- tidyr::gather(data = df1, key = "Type", value = "Novelty", -Observation, na.rm = TRUE)
+    d$Observation <- reorder(d$Observation, -d$Novelty, FUN = sum)
+    p <- ggplot(data = d, aes(x = Observation, y = Novelty, fill = Type)) +
+      scale_x_discrete() +
+      geom_bar(position = "stack", stat = "Identity") +
+      labs(title = "Novelty of observations", x = "Observation", y = "Novelty") +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+            axis.line.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank())
+    plotly(p)
+  })
+
+  # ###########################################################################
+  # output$MD2 <- renderPlotly({
+  #   req(input$ProbType != "Any")
+  #   sd <- getSomeData()
+  #   if (!isRoleValid(input$SortOrder, sd)) {
+  #     order <- 1:nrow(sd)
+  #     xLabel <- paste("Observations in natural order")
+  #   } else {
+  #     order <- sd[,input$SortOrder, drop = TRUE]
+  #     xLabel <- paste("Observations in", input$SortOrder, "order")
+  #   }
+  #   mahal <- getMahalanobis2()
+  #   data <- data.frame(md2 = mahal$MD2, order)
+  #   if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
+  #      data$class <- sd[,input$Target]
+  #   }
+  #   if (input$ID != "") {
+  #     data$ID <- sd[,input$ID, drop = TRUE]
+  #   }
+  #   data <- data[order(order), ]
+  #   data$sequence <- 1:nrow(data)
+  #   thresh <- qchisq(p = 0.999, df = mahal$nvar)
+  #   plot <- ggplot(data = data, mapping = aes(y = md2, x = sequence)) +
+  #     scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
+  #     labs(y = "Mahalanobis distance squared", x = xLabel,
+  #          title = "Outlier plot") +
+  #     geom_abline(slope = 0, intercept = thresh, color = "red") 
+  # 
+  #   if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
+  #     plot <- plot +
+  #       geom_point(mapping = aes(color = class)) +
+  #       theme(legend.position = "left")
+  #   } else {
+  #     plot <- plot +
+  #       geom_point() +
+  #       theme(legend.position = "none")
+  #   }
+  #   plotly(plot, tooltip = c("class", "md2", "sequence"))
+  # })
+  # 
+  # ###########################################################################
+  # output$qqplot <- renderPlotly({
+  #   req(input$ProbType != "Any")
+  #   mahal <- getMahalanobis2()
+  #   dof <- mahal$nvar
+  #   data <- data.frame(md2 = mahal$MD2)
+  # 
+  #   sd <- getSomeData()
+  #   if (input$ID != "") {
+  #     data$ID <- sd[ ,input$ID, drop = TRUE]
+  #   }
+  #   plot <- if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
+  #     data$class <- sd[,input$Target]
+  #     data <- data[order(data$md2), , drop = FALSE]
+  #     ggplot(data = data, mapping = aes(sample = md2, color = class)) +
+  #       geom_qq(distribution = stats::qchisq, dparams = dof) +
+  #       geom_qq_line(distribution = stats::qchisq, dparams = dof) +
+  #       scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
+  #       scale_x_continuous(limits = c(0, max(data$md2)*1.1)) +
+  #       labs(x = "Quantiles of Chi squared", y = "Mahalanobis distance squared", title = "Quantile plot")
+  #   } else {
+  #     data <- data[order(data$md2), , drop = FALSE]
+  #     ggplot(data = data, mapping = aes(sample = md2)) +
+  #       geom_qq(distribution = stats::qchisq, dparams = dof) +
+  #       geom_qq_line(distribution = stats::qchisq, dparams = dof) +
+  #       scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
+  #       scale_x_continuous(limits = c(0, max(data$md2)*1.1)) +
+  #       labs(x = "Quantiles of Chi squared", y = "Mahalanobis distance squared", title = "Quantile - Quantile plot")
+  #   }
+  #   plotly(plot, tooltip = c("class", "md2"))
+  # })
+
+  ###########################################################################
+  output$OutlierPlots <- renderPlotly({
+    req(input$ProbType != "Any")
+    sd <- getSomeData()
+    if (!isRoleValid(input$SortOrder, sd)) {
+      order <- 1:nrow(sd)
+      xLabel <- paste("Observations in natural order")
+    } else {
+      order <- sd[,input$SortOrder, drop = TRUE]
+      xLabel <- paste("Observations in", input$SortOrder, "order")
+    }
+    mahal <- getMahalanobis2()
+    data <- data.frame(md2 = mahal$MD2, order)
+    if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
+      data$class <- sd[,input$Target]
+    }
+    if (input$ID != "") {
+      data$ID <- sd[,input$ID, drop = TRUE]
+    }
+    data <- data[order(order), ]
+    data$sequence <- 1:nrow(data)
+    thresh <- qchisq(p = 0.999, df = mahal$nvar)
+    plot1 <- ggplot(data = data, mapping = aes(y = md2, x = sequence)) +
+      scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
+      labs(y = "Mahalanobis distance squared", x = xLabel) +
+      geom_abline(slope = 0, intercept = thresh, color = "red") 
+    
+    if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
+      plot1 <- plot1 +
+        geom_point(mapping = aes(color = class)) +
+        theme(legend.position = "left")
+    } else {
+      plot1 <- plot1 +
+        geom_point() +
+        theme(legend.position = "none")
+    }
+
+    dof <- mahal$nvar
+    data <- data.frame(md2 = mahal$MD2)
+    if (input$ID != "") {
+      data$ID <- sd[ ,input$ID, drop = TRUE]
+    }
+    plot2 <- if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
+      data$class <- sd[,input$Target]
+      data <- data[order(data$md2), , drop = FALSE]
+      ggplot(data = data, mapping = aes(sample = md2, color = class)) +
+        geom_qq(distribution = stats::qchisq, dparams = dof) +
+        geom_qq_line(distribution = stats::qchisq, dparams = dof) +
+        scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
+        scale_x_continuous(limits = c(0, max(data$md2)*1.1)) +
+        labs(x = "Quantiles of Chi squared", y = "Mahalanobis distance squared", title = "Outlier plot")
+    } else {
+      data <- data[order(data$md2), , drop = FALSE]
+      ggplot(data = data, mapping = aes(sample = md2)) +
+        geom_qq(distribution = stats::qchisq, dparams = dof) +
+        geom_qq_line(distribution = stats::qchisq, dparams = dof) +
+        scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
+        scale_x_continuous(limits = c(0, max(data$md2)*1.1)) +
+        labs(x = "Quantiles of Chi squared", y = "Mahalanobis distance squared", title = "Mahanobis Distance squared Outliers and Chi squared Quantile plot")
+    }
+    
+    sideBySide(plots = list(plot1, plot2), tooltips = c("class", "md2", "sequence"), widths = c(9,3))
+  })
+  
+  
+  ###########################################################################
+  output$RoleTypeChart <- plotly::renderPlotly({
+    ds <- getDataSummary()
+    Role <- vector(mode = "character", length  = nrow(ds))
+    Role[rownames(ds) == input$Target] <- "Outcome"
+    Role[rownames(ds) == input$ID] <- "ID"
+    Role[rownames(ds) == input$PreSplit] <- "Partition"
+    Role[rownames(ds) == input$Weights] <- "Weights"
+    Role[rownames(ds) %in% input$Groups] <- "Groups"
+    Role[rownames(ds) %in% input$HideCol] <- "Hidden"
+    Role[Role == ""] <- "Predictor"
+    ds$role <- Role
+    ds$cardinality <- ds$uniqueness
+    ds$name <- rownames(ds)
+    plot <- ggplot(ds, aes(x = name, y = role, fill = type, label = cardinality)) +
+      geom_raster() +
+      labs(x = "Variables", y = "Roles", title = "Variable names, roles, types and cardinality") +
+      theme( axis.text.x = element_text(angle = -45, hjust = 1))
+    plotly(plot, tooltip = c("role", "type", "cardinality", "name"))
+  })
+
+  ###########################################################################
+  getNumericPredictors <- reactive({
+    d <- getPredictorData()
+    types <- allClass(d) %in% c("numeric","integer")
+    if (any(types)) {
+      d <- d[,which(types), drop = FALSE]
+    } else {
+      d <- data.frame()
+    }
+    d
+  })
+
+  ###########################################################################
+  getKnnDist <- reactive({
+    d <- getNumericPredictors()
+    d <- scale(d, scale = input$ScaleChart)
+    if (isRoleValid(input$Target, d)) {
+       d <- d[, colnames(d) != input$Target]
+    }
+    minPts <- ncol(d) + 1
+    d <- na.omit(d)
+    obj <- dbscan::kNN(as.matrix(d), k = minPts, approx = TRUE)
+    minEps <- min(obj$dist[,minPts]) 
+    maxEps <- max(obj$dist[,minPts])
+    isolate({
+      if (input$Eps <= minEps || input$Eps >= maxEps) {
+        eps <- maxEps/3
+      } else {
+        eps <- input$Eps 
+      }
+    })
+    updateSliderInput(session = session, inputId = "Eps", min = minEps, max = maxEps, value = eps)
+    obj
+  })
+  
+  ###########################################################################
+  output$ClusterPlot <- renderPlot({
+    d <- getNumericPredictors()
+    d <- scale(d, scale = input$ScaleChart)
+    if (isRoleValid(input$Target, d)) {
+      d <- d[, colnames(d) != input$Target, drop = FALSE]
+    }
+    d <- as.matrix(na.omit(d))
+    minPts <- ncol(d) + 1
+    clust <- dbscan::hdbscan( x = d, minPts = minPts, gen_simplified_tree = FALSE, gen_hdbscan_tree = TRUE)
+    output$Clusters <- renderValueBox({
+      valueBox(subtitle = "Number of clusters", value = length(unique(clust$cluster)) - 1, color = EDAColour)
+    })
+    output$Outliers <- renderValueBox({
+      valueBox(subtitle = "Number of outliers", value = sum(clust$cluster == 0), color = EDAColour)
+    })
+    output$ClusterPrint <- renderPrint({
+      print(clust)
+    })
+    plot(clust)   #, main = "Hierarchical Density-based clustering (HDBSCAN)")
+    title(main = "Hierarchical density based spatial clustering (numeric variables only)")
+    abline(h = input$Eps, lty = 2)
+  }, bg = "transparent")
+  
+  ###########################################################################
+  output$KnnDistPlot <- renderPlot({
+    obj <- getKnnDist()
+    dbscan::kNNdistplot(obj)
+    abline(h = input$Eps, lty = 2)
+  }, bg = "transparent")
+  
+  # ###########################################################################
+  # getNumData <- reactive({
+  #   d <- getData()
+  #   types <- allClass(d) %in% c("numeric","integer")
+  #   if (any(types)) {
+  #     d <- d[,which(types), drop = FALSE]
+  #   } else {
+  #     d <- data.frame()
+  #   }
+  #   # limit to first 20 columns for speed <<<<<<<<<<TODO make input$?
+  #   if (ncol(d) > 20) {
+  #     d <- d[,1:20]
+  #   }
+  #   d
+  # })
+
+  ###########################################################################
+  output$NumericNovelties <- renderPlot({
+    #Boxplots with coef are incompatible with plotly
+    #Boxplots (and outliers) are only meaningful for continuous data
+    d <- getSomeDefinitelyContinuousData()
+    nvar <- ncol(d)
+    if (nvar == 0) {
+      showNotification(ui = "There are no continuous numeric variables", type = "warning")
+    }
+    req(nvar > 0)
+    rec <- recipes::recipe(~., data = d)
+
+    if (input$UseYJ) {
+      rec <- recipes::step_YeoJohnson(rec, all_numeric(), num_unique = 10)
+    }
+    if (input$ScaleChart) {
+      rec <- recipes::step_center(rec, all_numeric()) %>%
+        recipes::step_scale(all_numeric())
+      xlab <- "Standardised variable value"
+    } else {
+      xlab <- "Variable value"
+    }
+    rec <- recipes::prep(rec, data = d, retain = TRUE)
+    d <- recipes::juice(rec, composition = "data.frame")
+
+    outlier <- matrix(data = FALSE, nrow = nrow(d), ncol = ncol(d))
+    for (col in 1:ncol(d)) {
+      stats <- boxplot.stats(x = d[,col], coef = getMultiplier())
+      if (length(stats$out) > 0) {
+        outlier[d[, col] %in% stats$out, col] <- TRUE
+      }
+    }
+    colnames(outlier) <- colnames(d)
+
+    if (input$HideIrrelevant) {
+      keep <- apply(X = outlier, MARGIN = 2, FUN = any)
+      d <- d[, keep, drop = FALSE]
+      outlier <- outlier[, keep, drop = FALSE]
+    }
+    req(ncol(d) > 0)
+
+    if (input$ID != "") {
+      d$rownames <- getSomeData()[, input$ID]
+    } else {
+      d$rownames <- 1:nrow(d)
+    }
+
+    d <- reshape2::melt(data = d, id.vars = "rownames")
+    req(ncol(d) == 3)
+    colnames(d) <- c("ID", "Variable", "value")
+    for (col in 1:ncol(outlier)) {
+      d[ d$Variable == (colnames(outlier)[col]) & !outlier[, col], "ID" ] <- NA   #hide the id for non-outlier cases
+    }
+    title <- paste("Uni-variable boxplots at IQR multiplier of", getMultiplier())
+    if (input$UseYJ) {
+      title <- paste(title, "with Yeo-Johnson reshaping")
+      if (input$ScaleChart) {
+        title <- paste(title, "and with scaling")
+      }
+    } else {
+      if (input$ScaleChart) {
+        title <- paste(title, "with scaling")
+      }
+    }
+
+    ggplot(data = d, mapping = aes(x = Variable, y = value, fill = Variable)) +
+      geom_boxplot(coef = getMultiplier(), outlier.colour = "red", ) +
+      geom_text_repel(mapping = aes(label = ID)) +
+      labs(title = title, y = NULL, x = NULL) +
+      coord_flip() +
+      theme(legend.position = "none",
+            panel.background = element_rect(fill = "transparent"),
+            plot.background = element_rect(fill = "transparent", color = NA),
+            panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank()
+      )
+  }, bg = "transparent")
+
+  ###########################################################################
+  observe({
+    d <- getSomePossiblyContinuousData()
     vars <- colnames(d)
     num <- ncol(d)
-    if (input$Class %in% vars) {
-      num <- num-1
+    if (isRoleValid(input$Target, d)) {
+      num <- num - 1
     }
     if (num < 2) {
-      shinyjs::hideElement(id="DimReductType")
+      shinyjs::disable(id = "DimReductType")
     } else {
-      shinyjs::showElement(id="DimReductType")
-      if (input$Class %in% vars) {
-        updateSelectInput(session = session, inputId = "DimReductType", choices = c("PCA","PLS","MDS"), selected = "PLS")
+      shinyjs::enable(id = "DimReductType")
+      ds <- getDataSummary()
+      if (input$Target %in% rownames(ds)) {
+        updateSelectInput(session = session, inputId = "DimReductType", choices = list("PCA","PLS","MDS","isoMDS","Sammon"), selected = "PLS")
       } else {
-        updateSelectInput(session = session, inputId = "DimReductType", choices = c("PCA","MDS"), selected = "PCA")
+        updateSelectInput(session = session, inputId = "DimReductType", choices = list("PCA","MDS","isoMDS","Sammon"), selected = "PCA")
       }
     }
   })
 
-  ###########################################################################
-  output$MultiDimNovelties <- renderPlot({
-    d <- getContData()
-    req(ncol(d) > 0)
-    vars <- colnames(d)
-    num <- length(vars)
-    if (input$Class %in% vars) {
-      num <- num-1
+  ########################################################################  ###
+  getBagplot <- reactive({
+    d <- na.omit(getSomeData())
+    if (input$ID != "") {
+      labels <- d[,input$ID]
+    } else {
+      labels <- rownames(d)
     }
+    ds <- getDataSummary()
+    # need to remove special roles and restrict to numeric and use definitely continuous
+    d <- d[, colnames(d) == input$Target | (ds$uniqueness >= (getContinuousDebounced()[2]) & ds$numeric), drop = FALSE]
+    d <- d[, setdiff(colnames(d), getNonPredictors()), drop = FALSE]
+
+    nvar <- ncol(d)
+    if (nvar == 0) {
+      showNotification(ui = "There are no continuous numeric variables", type = "warning")
+    }
+    req(nvar > 0)
+    if (input$UseYJ) {
+      d <- recipes::recipe(~., data = d) %>%
+        recipes::step_YeoJohnson(all_numeric(), num_unique = 10) %>%
+        recipes::prep(data = d, retain = TRUE) %>%
+        recipes::juice(composition = "data.frame")
+    }
+    vars <- colnames(d)
+    num <- length(setdiff(vars, input$Target))
     req(num >= 2)
-    if (input$Class %in% colnames(d)) {
+    if (input$Target %in% colnames(d)) {
       if (input$DimReductType == "PLS") {
-        form <- as.formula(paste0(input$Class, " ~ ."))
+        form <- as.formula(paste0(input$Target, " ~ ."))
       } else {
-        form <- as.formula(paste0("~. -", input$Class))
+        d <- d[, colnames(d) != input$Target]
+        form <- as.formula(paste0("~. "))
       }
     } else {
       form <- as.formula(paste0("~."))
     }
-    par(pty="s")
-    switch(
+    data <- switch(
       input$DimReductType,
-      "PCA" = biplot(prcomp(formula = form, data = d, rank. = 2, center = TRUE, scale. = input$ScaleChart, na.action = na.omit), main = "PCA - Biplot of first two components", cex = 0.6, var.axes = FALSE, col = c("brown","palegreen4")),
-      "PLS" = biplot(plsr(formula = form, ncomp = 2, data = d, center = TRUE, scale = input$ScaleChart, na.action = na.omit), main = "PLS - Biplot of first two components", cex = 0.6, var.axes = FALSE, col = c("brown","palegreen4")),
-      "MDS" = {
-        cmd <- cmdscale(dist(scale(d, center = TRUE, scale = input$ScaleChart), method = "manhattan"), k = 2)
-        plot(cmd, xlab = "PC1", ylab = "PC2", asp = 1, type = "n", main = "MDS - Biplot of first two components")
-        text(cmd, labels = rownames(d), cex = 0.6, col = "brown")
-      }
+      "PCA"    = stats::prcomp(formula = form, data = d, center = TRUE, rank. = 2, scale. = input$ScaleChart, na.action = na.exclude, retx = TRUE)$x[,1:2],
+      "PLS"    = {
+        rec <- recipe(formula = form, data = d) %>%
+          step_naomit(all_predictors(), all_outcomes(), skip = TRUE) %>%
+          step_center(all_predictors())
+        if (input$ScaleChart) {
+          rec <- rec %>% step_scale(all_predictors())
+        }
+        target <- input$Target
+        rec %>%
+          step_pls(all_predictors(), num_comp = 2, outcome = target) %>%
+          prep(data = data) %>%
+          juice(all_predictors(), composition = "data.frame")
+      },
+      "MDS"    = stats::cmdscale(dist(scale(d, center = TRUE, scale = input$ScaleChart), method = input$DistanceMethod), k = 2),
+      "isoMDS" = MASS::isoMDS(dist(scale(d, center = TRUE, scale = input$ScaleChart), method = input$DistanceMethod), k = 2)$points,
+      "Sammon" = MASS::sammon(dist(scale(d, center = TRUE, scale = input$ScaleChart), method = input$DistanceMethod), k = 2)$points
     )
-    if (input$DimReductType %in% c("PCA", "PLS","MDS") && input$ShowLegend) {
-      legend("topleft", c("Observations", "Variables"), fill = c("brown","palegreen4"))
-    }
+    x <- data[,1, drop = TRUE]
+    y <- data[,2, drop = TRUE]
+    names(x) <- labels
+    names(y) <- labels
+    aplpack::compute.bagplot(x, y, factor = (getMultiplier() + 1), na.rm = FALSE) # using +1 because multiplier is defined differently for boxplot
   })
 
   ###########################################################################
-  observe({
-    d <- getFactData()
-    if (ncol(d) == 0) {
-      choices <- c()
+  output$MultiDimNovelties <- renderPlot({
+    bag <- getBagplot()
+    plot(bag, show.bagpoints = FALSE)
+    if (!is.null(bag$pxy.outlier) && nrow(bag$pxy.outlier) > 0) {
+      text(bag$pxy.outlier, labels = rownames(bag$pxy.outlier), pos = 4)
+    }
+  }, bg = "transparent")
+
+  ###########################################################################
+  output$MultiDimNovText <- renderText({
+    bag <- getBagplot()
+    if (!is.null(bag$pxy.outlier) && nrow(bag$pxy.outlier) > 0) {
+      count <- nrow(bag$pxy.outlier)
     } else {
-      choices <- colnames(d)
-      levs <- allLevels(d)
-      choices <- choices[order(levs, decreasing = FALSE)]
-      names(choices) <- paste0(choices, " [", sort(levs, decreasing = FALSE), "]")
+      count <- 0
     }
-    if (length(choices) == 0) {
-      selected <- NULL
-      shinyjs::hideElement(id="FactorNovelties")
-      shinyjs::hideElement(id="Factors")
-    } else if (length(choices) > 2) {
-      selected <- choices[1:2]
-      shinyjs::showElement(id="FactorNovelties")
-      shinyjs::showElement(id="Factors")
+    text <- paste(count, "bagplot outliers using an equivalent multipler of", getMultiplier())
+    text <- paste(text, paste(collapse = " and ", na.omit(c(ifelse(input$ScaleChart, "with standardising", NA), ifelse(input$UseYJ, "with reshaping", NA)))))
+    text
+  })
+
+  ###########################################################################
+  output$MultiDimNovIDs <- DT::renderDataTable({
+    bag <- getBagplot()
+    req(!is.null(bag$pxy.outlier) & nrow(bag$pxy.outlier) > 0)
+    d <- data.frame("ID" = rownames(bag$pxy.outlier))
+    DT::datatable(data = d, rownames = FALSE, fillContainer = TRUE, selection = "none",
+                  options = list(searching = FALSE,
+                                 order = FALSE,
+                                 pageLength = nrow(d),
+                                 dom = "t")
+    )
+  })
+
+  ###########################################################################
+  getPPS <- reactive({
+    data <- getSomePredictorData()
+    maxcols <- getColsDebounced()
+    if (ncol(data) > maxcols) {
+      ds <- getDataSummary()
+      cols <- rownames(ds)[!ds[,"nzv", drop = TRUE]]
+      data <- data[, colnames(data) %in% cols]  # remove near zero variance variables
+    }
+    if (ncol(data) > maxcols) {
+      vi <- getVarImp()
+      vi <- vi[names(vi) %in% colnames(data)]
+      vi <- vi[1:min(maxcols, length(vi))]
+      data <- data[, colnames(data) %in% c(input$Target,names(vi))]
+    }
+    data <- na.omit(data)
+    par <- isolate(input$Parallel)
+    obj <- NA
+    if (par) {
+      obj <- startParallel("pps")
+    }
+    showNotification(id = "pps", ui = "Calculating Predictive Power Scores", duration = NULL)
+    cor <- pps(data, allowParallel = par, limit = getMaxRowsDebounced())
+    removeNotification(id = "pps")
+    if (par) {
+      stopParallel(obj)
+    }
+    cor
+  })
+
+  ###########################################################################
+  output$Correlation <- renderPlotly({
+    data = getSomePredictorData()
+    ds <- getDataSummary()
+    cols <- rownames(ds)[ds[,"numeric", drop = TRUE]]
+    data <- data[, colnames(data) %in% cols]  # remove non-numeric variables
+    cols <- rownames(ds)[ds[,"uniqueness", drop = TRUE] > 1]
+    data <- data[, colnames(data) %in% cols]  # remove zero variance variables
+    maxcols <- getColsDebounced()
+    if (ncol(data) > maxcols) {
+      cols <- rownames(ds)[ds[,"uniqueness", drop = TRUE] > getContinuousDebounced()[1]]
+      data <- data[, colnames(data) %in% cols]  # remove non continuous  variables
+    }
+    if (ncol(data) > maxcols) {
+      cols <- rownames(ds)[!ds[,"nzv", drop = TRUE]]
+      data <- data[, colnames(data) %in% cols]  # remove near zero variance variables
+    }
+    if (ncol(data) > maxcols) {
+      vi <- getVarImp()
+      vi <- vi[names(vi) %in% colnames(data)]
+      vi <- vi[1:min(maxcols, length(vi))]
+      if (ds[input$Target, "numeric"]) {
+        vi <- c(100,vi)
+        names(vi)[1] <- input$Target
+      }
+      data <- data[, colnames(data) %in% names(vi)] # remove low variable importance
+    }
+    req(ncol(data) > 0)
+    if (input$CorMethod == "Distance") {
+      corr <- cor.distance(data)
+      title <- "Distance Correlation"
+    } else if (input$CorMethod == "Predictive Power") {
+        corr <- getPPS()
+        title <- "Predictive Power"
     } else {
-      selected <- choices[1:length(choices)]
-      shinyjs::showElement(id="FactorNovelties")
-      shinyjs::showElement(id="Factors")
+      corr <- cor(data, method = tolower(input$CorMethod), use = "pairwise.complete.obs")
+      if (input$CorAbs) {
+        corr <- abs(corr)
+        title <- paste0(input$CorMethod," (absolute) Correlation")
+
+      } else {
+        title <- paste0(input$CorMethod, " Correlation")
+      }
     }
-    updateSelectizeInput(session = session, inputId = "Factors", choices = choices, selected = selected)
-  }, priority = 10)
-
-  ###########################################################################
-  output$FactorNovelties <- renderPlot({
-    #For factor data - show mosaic plot
-    d <- getFactData()
-    req(input$Factors)
-    req(all(input$Factors %in% colnames(d)))
-    formula = as.formula(paste0("~", paste0(input$Factors, collapse = "+")))
-    mosaic(formula = formula, data = d, main = "Factor novelties", sub = "Novelty shows in red",
-           legend = TRUE, shade = TRUE)
+    p <- if (input$CorGrouping == "none") {
+      ggcorrplot(corr = corr, method = "square", hc.order = FALSE, type = "full", lab = TRUE,
+                 title = title, show.diag = FALSE, show.legend = FALSE)
+    } else {
+      title <- paste(title,"Ordered by", input$CorGrouping)
+      ggcorrplot(corr = corr, method = "square", hc.order = TRUE, type = "full", lab = TRUE,
+                 title = title, show.diag = FALSE, show.legend = FALSE, hc.method = input$CorGrouping)
+    }
+    plotly(p, tooltip = c("Var1","Var2","value"))
   })
 
   ###########################################################################
-  output$YBalance <- renderPlot({
-    req(input$Class)
-    d <- getData()
-    column <- d[,input$Class, drop = TRUE]
-    ggplot(data = d, aes(x = column)) +
-      geom_histogram(fill = "blue", alpha = 0.7, stat = ifelse(is(column, "numeric"), "bin", "count")) +
-      geom_bar(fill = "blue", alpha = 0.7) +
-      labs(title = "Histogram of dependent variable") +
-      labs(x = input$Class, y = "Count") +
-      theme(plot.title = element_text(lineheight=1, face="bold", hjust = 0.5))
-  })
+  output$Pairs <- renderPlot({
+    maxcols <- getColsDebounced()
+    data = getSomeData()
+    ds <- getDataSummary()
+    #turn numeric with possibly few levels into factors
+    cont <- getContinuousDebounced()
+    toFactor <- rownames(ds)[ds$uniqueness <= (cont[1]) & ds$numeric]
+    for (col in toFactor) {
+      data[, col] <- as.factor(data[, col, drop = TRUE])
+    }
+    subset <- colnames(data)
 
-  ###########################################################################
-  output$FeaturePlot <- renderPlot({
-    chart.Correlation(getNumData())
-  })
+    #reject factors with possibly too many levels - unless it is the target
+    bad <- rownames(ds)[ds$factor & ds$uniqueness > cont[1]]
+    bad <- setdiff(bad, input$Target)
+    if (length(bad) > 0) {
+      subset <- setdiff(subset, bad)
+    }
+
+    #reject date and character variables
+    bad <- rownames(ds)[ds$text | ds$date]
+    if (length(bad) > 0) {
+      subset <- setdiff(subset, bad)
+    }
+
+    subset <- setdiff(subset, getNonPredictors())
+    data <- data[,subset]
+
+    if (ncol(data) > maxcols) {
+      vi <- getVarImp()
+      vi <- vi[1:min(maxcols, length(vi))]
+      data <- data[, subset %in% c(input$Target,names(vi))]
+    }
+    req(ncol(data) > 1)
+    showNotification(id = "plotpairs", ui = "Calculating pairs plots", duration = NULL)
+    if (input$ProbType == "Classification" && isRoleValid(input$Target, data)) {
+      plot <- GGally::ggpairs(data = data, mapping = ggplot2::aes(colour = data[, input$Target]), title = "Pairs plot of most important variables",
+                              cardinality_threshold = getContinuousDebounced()[1])
+    } else {
+      plot <- GGally::ggpairs(data = data, cardinality_threshold = getContinuousDebounced()[1])
+    }
+    removeNotification(id = "plotpairs")
+    plot
+  }, bg = "transparent")
 
   ###########################################################################
   output$MissCorr <- renderPlot({
-    req(input$Class)
     d <- getSomeData()
-    m <- ifelse(is.na(d[,colnames(d) != input$Class]), 1, 0)
+    m <- ifelse(is.na(d), 1, 0)
     cm <- colMeans(m)
-    cnts <- colSums(m) / nrow(m)
-    m <- m[, cm > 0 & cm < 1 & cnts > input$ThresholdMissing]
+    m <- m[, cm > 0 & cm < 1, drop = FALSE]
     req(ncol(m) > 0)
-    corrgram::corrgram(cor(m), order = "OLO", abs = TRUE)
-    title(main="Predictor missing value correlation")
+    corrgram::corrgram(cor(m), order = "OLO", abs = TRUE)  #TODO change to ggplot as per other correlation chart
+    title(main = "Variable missing value correlation",
+          sub = "Notice whether variables are missing in sets")
+  }, bg = "transparent")
+
+  ###########################################################################
+  getMissingnessTree <- reactive({
+    d <- getData()
+    req(ncol(d) > 0, nrow(d) > 0)
+    d$missingness <- base::apply(X = is.na(d), MARGIN = 1, FUN = sum)
+    req(any(d$missingness > 0))
+    model <- rpart(formula = missingness ~ ., data = d)
   })
 
   ###########################################################################
-  output$MissingnessInformation <- renderPlot({
-    req(input$Class)
-    d <- getSomeData()
-    m <- ifelse(is.na(d[,colnames(d) != input$Class]), 1, 0)
-    cm <- colMeans(m)
-    cnts <- colSums(m) / nrow(m)
-    m <- m[, cm > 0 & cm < 1 & cnts > input$ThresholdMissing]
-    req(ncol(m) > 0)
-    m <- cbind(d[, colnames(d) == input$Class], m)
-    colnames(m)[1] <- input$Class
-    form <- as.formula(paste(input$Class, "~ ."))
-    model <- pls::mvr(formula = form, data = as.data.frame(m), center = TRUE, scale = input$ScaleChart)
-    data <- data.frame(d[,input$Class], scores(model)[,1])
-    colnames(data) <- c(input$Class, "Comp1")
-    if(input$ProbType == "Regression") {
-      ggplot2::ggplot(data, mapping = aes(x=data[,2], y=data[,1])) +
-        ggtitle(label = "Relationship between target and missingness first-component") +
-        labs(x = "Component 1", y = input$Class) +
-        geom_point() +
-        theme(plot.title = element_text(lineheight=1, face="bold", hjust = 0.5))
-    } else {
-      ggplot2::ggplot(data, mapping = aes(x=data[,1], y=data[,2])) +
-        ggtitle(label = paste("Relationship between", input$Class, "and missingness first-component")) +
-        labs(y = "Component 1", x = input$Class) +
-        geom_boxplot(notch = FALSE, coef = 1.5, fill = "orange") +
-        coord_flip() +
-        theme(plot.title = element_text(lineheight=1, face="bold", hjust = 0.5))
-    }
+  output$MissingnessInformationPlot <- renderPlot({
+    tree <- getMissingnessTree()
+    rpart.plot::rpart.plot(tree, shadow.col = "gray", main = "Predicting the number of missing variables in an observation",
+                           sub = "Check whether the outcome variable is an important variable", roundint = FALSE)
+  }, bg = "transparent")
+
+  ###########################################################################
+  output$MissingnessVariables <- renderPlotly({
+    vi <- getMissingnessTree()$variable.importance
+    varImp <- vi / sum(vi)
+    varImp <- sort(varImp, decreasing = TRUE)[1:min(c(15,length(varImp)))]
+    interesting <- names(varImp) %in% c(input$Target, input$ID, input$Weights, input$Groups, input$PreSplit)
+    d <- data.frame(varImp, variables = names(varImp), interesting)
+    d <- transform(d, variables = reorder(variables, -varImp) )
+    p <- ggplot(data = d) +
+      geom_col(aes(y = varImp, x = variables, fill = interesting)) +
+      labs(title = "Variable Importance for predicting missing variables per observation", y = "Relative Importance")
+    plotly(p)
   })
 
   ###########################################################################
   getPartition <- reactive({
     d <- getRawData()
-    if(!is.null(input$PreSplit) && length(input$PreSplit) > 0 && input$PreSplit != "") {
-      splitter <- d[ ,input$PreSplit, drop = TRUE]
-      lvs <- unique(splitter)
+    if (!is.null(input$PreSplit) && length(input$PreSplit) > 0 && input$PreSplit != "") {
+      splitVar <- d[ ,input$PreSplit, drop = TRUE]
+      req(!any(is.na(splitVar)))
+      lvs <- unique(splitVar)
       req(length(lvs) == 2)
-      shinyjs::hideElement(id="Ratio")
+      shinyjs::hideElement(id = "Ratio")
       train <- 2
       if (toupper(as.character(lvs[1])) == "TRAIN")  {
         train <- 1
-      } else if (sum(splitter==lvs[1]) > nrow(d)) {
+      } else if (sum(splitVar == lvs[1]) > nrow(d)) {
         train <- 1
       }
-      split <- splitter == lvs[train]
+      split <- splitVar == lvs[train]
       split <- (1:nrow(d))[split] # want this as row numbers
+    } else if (input$Groups != "") {
+      req(isRoleValid(input$Groups, d))
+      shinyjs::showElement(id = "Ratio")
+      grouped <- d[,input$Groups, drop = FALSE]
+      req(!any(is.na(grouped)))
+      cumFreq <- cumsum(sort(table(grouped), decreasing = FALSE))
+      cumProp <- cumFreq / max(cumFreq)
+      trainLevels <- names(cumProp[cumProp <= input$Ratio])
+      split <- (1:nrow(d))[d[,input$Groups, drop = TRUE] %in% trainLevels]
     } else {
-      req(input$Class)
-      req(any(colnames(d) == input$Class))
-      shinyjs::showElement(id="Ratio")
-      y <- d[, which(colnames(d) == input$Class), drop = TRUE]
+      req(isRoleValid(input$Target, d))
+      shinyjs::showElement(id = "Ratio")
+      y <- d[, which(colnames(d) == input$Target), drop = TRUE]
       req(length(y) > 1)
-      if (class(y) == "character") {
+      if (class(y) == "character" || any(is.na(y))) {
         split <- sample(x = 1:nrow(d), size = floor(input$Ratio * nrow(d)))
       } else {
-        results <- tryCatch({
-          unlist(createDataPartition(y = y, p = input$Ratio))
-        },
-        error = function(e) {
-          return(e)
-        })
-        if (is(results, "error")) {
-          react$partitionMessages <- c(results$messages, warnings())
-          split <- NULL
-        } else {
-          react$partitionMessages <- warnings()
-          split <- results
-        }
+        split <- caret::createDataPartition(y = y, p = input$Ratio, list = FALSE)
       }
     }
     split
   })
 
   ###########################################################################
-  output$SplitWarnings <- renderText({
-    req(react$partitionMessages)
-    paste(collapse="\n", react$partitionMessages)
-  })
-
-  ###########################################################################
-  output$SplitSummary <- renderText({
-    train <- length(getPartition())
-    test <- nrow(getData()) - train
-    paste("Before preprocessing there are", train, "train cases and", test, "test cases")
+  output$Splitter <- renderText({
+    if (!is.null(input$PreSplit) & input$PreSplit != "") {
+      paste("The data was partitioned using variable", input$PreSplit)
+    } else if (!is.null(input$Groups) & input$Groups != "") {
+      paste("The data was group-stratified using variable", input$Group)
+    } else {
+      paste("The data was target-stratified using variable", input$Target)
+    }
   })
 
   ###########################################################################
   getTrainData <- reactive({
-    getData()[getPartition(), ]
+    d <- getData()[getPartition(), ]
+    req(nrow(d) > 0)
+    d
   })
 
   ###########################################################################
   getTestData <- reactive({
-    getData()[-getPartition(), ]
+    d <- getData()[-getPartition(), ]
+    req(nrow(d) > 0)
+    d
   })
+
+  ###########################################################################
+  output$SplitCountTrain <- renderText({
+    d <- getTrainData()
+    req(d)
+    nrow(d)
+  })
+
+  ###########################################################################
+  output$SplitCountTest <- renderText({
+    d <- getTestData()
+    req(d)
+    nrow(d)
+  })
+
+  ###########################################################################
+  output$TestUncertainty <- renderInfoBox({
+    d <- getTestData()
+    req(d)
+    alpha = input$Probability/100
+    N <- nrow(d)
+    req(N > 30)
+    if (input$ProbType == "Regression") {
+      lower <- 100 - sqrt(N / qchisq(p = (1 - alpha)/2, df = N)) * 100
+      upper <- 100 - sqrt(N / qchisq(p = (1 + alpha)/2, df = N)) * 100
+      text <- paste0(round(lower), "%  to  +", round(upper),"% of the RMSE to cover ", alpha*100,"% of cases")
+    } else if (input$ProbType == "Classification") {
+      s <- qnorm(1 - (1 - alpha)/2) * 0.5 / sqrt(N)
+      text <- paste0("Worst case accuracy uncertainty +/- ",round(s, 3), " to cover ", alpha*100,"% of cases")
+    } else {
+      req(NULL)
+    }
+    infoBox(title = paste0(input$Probability,"% uncertainty of test metric"), value = text, icon = icon("question"), color = "yellow", fill = TRUE)
+  })
+
+  ###########################################################################
+  observeEvent({
+    input$Evaluate
+  },
+  {
+    data <- getData()
+    predictors <- setdiff(colnames(data), c(getNonPredictors(), input$Target))
+    if (input$PreSplit != "") {
+      part <- input$PreSplit
+    } else {
+      data$partition <- "Test"
+      data$partition[getPartition()] <- "Train"
+      part <- "partition"
+    }
+    form <- as.formula(paste0(part,"~",paste(collapse = "+", predictors)))
+
+    showNotification(id = "fair", ui = "Calculating partition fairness using Random Forest", duration = NULL)
+    parallelMode <- isolate(input$Parallel)
+    obj <- NA
+    if (parallelMode) {
+      obj <- startParallel("fair")
+    }
+    trControl <- caret::trainControl(method = "boot", number = 25, trim = TRUE, classProbs = TRUE, summaryFunction = twoClassSummary)  # for performance use oob which is specific to rf
+    rf <- caret::train(form, data = data, method = "rf", metric = "ROC", maximise = TRUE, trControl = trControl, na.action = na.exclude)
+    if (parallelMode) {
+      response <- stopParallel(obj)
+    }
+    if (is(rf, "error")) {
+      shinyalert::shinyalert(title = "Partition fairness", text = response)
+      return(NULL)
+    }
+    removeNotification(id = "fair")
+    react$ROC <- max(rf$results$ROC)
+  }, ignoreInit = FALSE)
+
+  ###########################################################################
+  output$SplitTest <- renderInfoBox({
+    req(react$ROC)
+    text <- paste("Predicting the partition using rf has a AuC of", round(react$ROC, 2), " compared to an expected value of 0.5")
+    infoBox(title = "Partition Fairness", value = text, icon = icon("balance-scale"), color = "yellow", fill = TRUE)
+  })
+
+  ###########################################################################
+  getBaseRecipe <- reactive({
+    data <- getTrainData()
+    req(isRoleValid(input$Target, data))
+    input$Restart
+    # Need to remove special roles ???
+    frecipe <- recipes::recipe(formula = as.formula(paste(input$Target, "~ .")), data = data)
+    if (input$Weights %in% colnames(data)) {
+      w <- input$Weights
+      frecipe <- update_role(frecipe, one_of(w), new_role = "case weight")
+    }
+    if (!is.null(input$ID) && all(input$ID %in% colnames(data))) {
+      w <- input$ID
+      frecipe <- update_role(frecipe, one_of(w), new_role = "case id")
+    }
+    if (length(react$HighCardinality) > 0) {
+      hc <- react$HighCardinality
+       frecipe <- recipes::add_role(frecipe, !!!hc, new_role = "high cardinality")
+    }
+    if (input$PreSplit %in% colnames(data)) {
+      vars <- input$PreSplit
+      frecipe <- update_role(frecipe, one_of(vars), new_role = "presplit")
+    }
+    if (all(input$Groups %in% colnames(data))) {
+      vars <- input$Groups
+      frecipe <- add_role(frecipe, one_of(vars), new_role = "group")
+      frecipe <- remove_role(frecipe, one_of(vars), old_role = "predictor")
+    }
+    if (!is.null(input$HideCol) && all(input$HideCol %in% colnames(data))) {
+      w <- input$HideCol
+      frecipe <- step_rm(frecipe, one_of(w))
+    }
+    frecipe
+  })
+  ###########################################################################
+  observe({
+    react$Recipe <- getBaseRecipe()
+    updateCheckboxInput(session = session, inputId = "MissingVar",       value = FALSE)
+    updateCheckboxInput(session = session, inputId = "MissingObs",       value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Shadow",           value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Unknown",          value = FALSE)
+    updateSelectInput(  session = session, inputId = "Impute",           selected = "none")
+    updateSelectInput(  session = session, inputId = "Balance",          selected = "none")
+    updateSelectInput(  session = session, inputId = "Variance",         selected = "none")
+    updateCheckboxInput(session = session, inputId = "LinComb",          value = FALSE)
+    updateCheckboxInput(session = session, inputId = "YJ",               value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Text",             value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Other",            value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Convert",          value = FALSE)
+    updateSelectInput(  session = session, inputId = "DateFeatures",     selected = NULL)
+    updateCheckboxInput(session = session, inputId = "Cyclic",           value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Center",           value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Scale",            value = FALSE)
+    updateSelectInput(  session = session, inputId = "DimReduce",        selected = "none")
+    updateCheckboxInput(session = session, inputId = "FeatureSelection", value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Clusters",         value = FALSE)
+    updateCheckboxInput(session = session, inputId = "Poly",             value = FALSE)
+    isolate({
+      react$RecipeChanged <- react$RecipeChanged + 1
+    })
+  }, priority = 10)
 
   ###########################################################################
   observe({
-    input$Restart
-    req(input$Class)
-    react$Recipe <- recipes::recipe(formula = as.formula(paste(input$Class, "~ .")), data = getTrainData())
-    if (input$Weights != "") {
-      update_role(react$Recipe, matches(input$Weights), new_role = "case_weight")
-    }
-    updateCheckboxInput(session = session, inputId = "Missing", value = FALSE)
-    updateSelectInput(session = session, inputId = "Impute", selected = "none")
-    updateSelectInput(session = session, inputId = "Balance", selected = "none")
-    updateCheckboxInput(session = session, inputId = "NZV", value = FALSE)
-    updateCheckboxInput(session = session, inputId = "LinComb", value = FALSE)
-    updateCheckboxInput(session = session, inputId = "YJ", value = FALSE)
-    updateCheckboxInput(session = session, inputId = "Other", value = FALSE)
-    updateSelectInput(session = session, inputId = "Convert", selected = "")
-    updateSelectInput(session = session, inputId = "DateFeatures", selected = "decimal")
-    updateCheckboxInput(session = session, inputId = "Center", value = FALSE)
-    updateCheckboxInput(session = session, inputId = "Scale", value = FALSE)
-    updateSelectInput(session = session, inputId = "DimReduce",selected = "none")
-
-    isolate({
-      # numPresent <- any(react$Recipe$var_info$type == "numeric")
-      # nomPresent <- any(react$Recipe$var_info$type == "nominal")
-      dtePresent <- any(react$Recipe$var_info$type == "date")
-      # othPresent <- !all(react$Recipe$var_info$type %in% c("numeric","date","nominal"))
-    })
-    shinyjs::toggleElement(id = "DateFeatures", condition = dtePresent)
-    shinyjs::toggleElement(id = "Balance", condition = input$ProbType == "Classification")
+    req(react$Recipe)
+    try({
+      tib <- react$Recipe$term_info
+      dtePresent <- any(tib$type == "date")   # & tib$role == "predictor")
+      nomPresent <- any(tib$type == "nominal" & tib$role == "predictor")
+      shinyjs::toggleElement(id = "DateFeatures", condition = dtePresent)
+      shinyjs::toggleElement(id = "Cyclic", condition = dtePresent)
+      shinyjs::toggleElement(id = "Convert", condition = nomPresent)
+      shinyjs::toggleElement(id = "Other", condition = nomPresent)
+    }, silent = TRUE)
   })
 
   ###########################################################################
+  ##### Imputation #####
   observeEvent(
     input$Impute,
-    ##### Imputation #####
     {
-      react$Recipe <- remove_step(react$Recipe, c("step_knnimpute", "step_bagimpute", "step_medianmpute", "step_modeimpute", "step_rollimpute", "step_meanimpute"))
+      d <- getSomeData()
+      react$Recipe <- remove_step(react$Recipe, c("naomit", "knnimpute", "bagimpute", "medianimpute", "modeimpute", "rollimpute", "meanimpute"))
       if (input$Impute != "none") {
         react$Recipe <- switch(
           input$Impute,
-          "omit"         = step_naomit(react$Recipe, all_predictors()),
-          "knnImpute"    = step_knnimpute(react$Recipe, all_predictors(), neighbors = 5),
-          "bagImpute"    = step_bagimpute(react$Recipe, all_predictors(), impute_with = imp_vars(all_predictors()), trees = 25) ,
-          "medianImpute" = step_medianimpute(react$Recipe, all_numeric(), -all_outcomes()) %>% step_modeimpute(all_nominal(), -all_outcomes()),
-          "rollImpute"   = step_rollimpute(react$Recipe, all_numeric(), -all_outcomes(), window = 5, statistic = median) %>% step_modeimpute(all_nominal(), -all_outcomes()),
-          "mean"         = step_meanimpute(react$Recipe, all_numeric(), -all_outcomes()) %>% step_modeimpute(all_nominal(), -all_outcomes())
+          "omit" = {
+            step_naomit(react$Recipe, all_predictors(), all_outcomes(), skip = TRUE)
+          },
+          "knnImpute" = {
+            step_knnimpute(react$Recipe, all_predictors(), neighbors = 5)
+          },
+          "Omit/knnImpute" = {
+            step_naomit(react$Recipe, all_predictors(), skip = TRUE) %>%
+              step_knnimpute(all_predictors(), neighbors = 5)
+          },
+          "bagImpute" = {
+            step_bagimpute(react$Recipe, all_predictors(), impute_with = imp_vars(all_predictors()), trees = 25)
+          },
+          "Omit/bagImpute" = {
+            step_naomit(react$Recipe, all_predictors(), skip = TRUE) %>%
+              step_bagimpute(all_predictors(), impute_with = imp_vars(all_predictors()), trees = 25)
+          },
+          "median.mode" = {
+            step_medianimpute(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group")) %>%
+              step_modeimpute(all_nominal(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+          },
+          "mean.mode" = {
+            step_meanimpute(all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group")) %>%
+              step_modeimpute(react$Recipe, all_nominal(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+          }
         )
       }
     }
@@ -908,166 +2195,594 @@ shinyServer(function(input, output, session) {
     input$Balance,
     ##### Balance Y column #####
     {
-      react$Recipe <- remove_step(react$Recipe, c("step_upsample", "step_downsample"))
+      react$Recipe <- remove_step(react$Recipe, c("smote", "nearmiss"))
       if (input$ProbType == "Classification" && input$Balance != "none") {
         react$Recipe <- switch(
           input$Balance,
-          "up"      = step_upsample(react$Recipe, all_outcomes(), ratio = 1.0, skip = TRUE),
-          "down"    = step_downsample(react$Recipe, all_outcomes(), ratio = 1.0, skip = TRUE),
-          "up-down" = step_downsample(react$Recipe, all_outcomes(), ratio = 0.5, skip = TRUE) %>% step_upsample(all_outcomes(), ratio = 1.0, skip = TRUE)
+          "up"      = themis::step_smote(react$Recipe, all_outcomes(), over_ratio = 1, neighbors = 5, skip = TRUE),
+          "down"    = themis::step_nearmiss(react$Recipe, all_outcomes(), under_ratio = 1, neighbors = 5, skip = TRUE),
+          "up-down" = themis::step_nearmiss(react$Recipe, all_outcomes(), under_ratio = 2, neighbors = 5, skip = TRUE) %>%
+            themis::step_smote(all_outcomes(), over_ratio = 1, neighbors = 5, skip = TRUE)
         )
       }
     }
   )
 
   ###########################################################################
+  ##### Add shadow Variables #####
+  observeEvent(
+    input$Shadow,
+    {
+      if (input$Shadow) {
+        react$Recipe <- step_shadow_missing(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+      } else {
+        react$Recipe <- remove_step(react$Recipe, c("shadow_missing"))
+      }
+    }
+  )
+
+  ###########################################################################
+  ##### Remove Linear Combinations (one of) #####
   observeEvent(
     input$LinComb,
-    ##### Remove Linear Combinations (one of) #####
     {
-      if(input$LinComb) {
-        react$Recipe <- step_lincomb(react$Recipe, all_numeric(), -all_outcomes())
+      if (input$LinComb) {
+        react$Recipe <- step_lincomb(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
       } else {
-        react$Recipe <- remove_step(react$Recipe, c("step_lincomb"))
+        react$Recipe <- remove_step(react$Recipe, c("lincomb","lincomp"))  ##TODO this is temp work around
       }
     }
   )
 
   ###########################################################################
+  ##### Yeo-Johnson reshaping #####
   observeEvent(
     input$YJ,
-    ##### Yeo-Johnson reshaping #####
     {
-      if(input$YJ) {
-        react$Recipe <- step_YeoJohnson(react$Recipe, all_numeric(), -all_outcomes())
+      if (input$YJ) {
+        react$Recipe <- step_YeoJohnson(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
       } else {
-        react$Recipe <- remove_step(react$Recipe, c("step_YeoJohnson"))
+        react$Recipe <- remove_step(react$Recipe, c("YeoJohnson"))
       }
     }
   )
 
   ###########################################################################
+  ##### Drop heavily missing variables #####
   observeEvent(
-    input$Missing,
-    ##### Drop near-all-missing columns #####
     {
-      if (input$Missing) {
-        react$Recipe <- step_missing(react$Recipe, all_predictors(), ratio = 0.5)
-      } else {
-        react$Recipe <- remove_step(react$Recipe, "step_missing")
-      }
+      input$MissingVar
+      input$MissVarThreshold
+    },
+    {
+      name <- "missingVar"
+      step <- get_step(react$Recipe, name)
+      if (input$MissingVar) {
+        if (is.null(step)) {
+          react$Recipe <- step_missingVar(react$Recipe, all_predictors(), ratio = input$MissVarThreshold/100)
+        } else {
+          rec <- react$Recipe
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], ratio = input$MissVarThreshold/100)
+          react$Recipe <- rec
+        }
+      } else
+        react$Recipe <- remove_step(react$Recipe, name)
     }
   )
 
   ###########################################################################
+  ##### Drop heavily missing observations #####
   observeEvent(
-    input$NZV,
-    ##### Drop Near-Zero Variance columns #####
     {
-      if (input$NZV) {
-        react$Recipe <- step_nzv(react$Recipe, all_predictors(), options = list(freq_cut = 95/5, unique_cut = 10))
-      } else {
-        react$Recipe <- remove_step(react$Recipe, "step_nzv")
-      }
+      input$MissingObs
+      input$MissRatio
+    },
+    {
+      name <- "missingObs"
+      step <- get_step(react$Recipe, name)
+      if (input$MissingObs) {
+        if (is.null(step)) {
+          react$Recipe <- step_missingObs(react$Recipe, all_predictors(), ratio = input$MissRatio/100)
+        } else {
+          rec <- react$Recipe
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], ratio = input$MissRatio/100)
+          react$Recipe <- rec
+        }
+      } else
+        react$Recipe <- remove_step(react$Recipe, name)
     }
   )
 
   ###########################################################################
+  ##### Assign missing factor levels to "Unknown" #####
   observeEvent(
-    input$Other,
-    ##### Accumulate Other level #####
     {
-      if (input$Other) {
-        react$Recipe <- step_other(react$Recipe, all_nominal(), -all_outcomes(), threshold = 0.05, other = "other")  ##arbitrary value 0.05
-      } else {
-        react$Recipe <- remove_step(react$Recipe, "step_other")
-      }
+      input$Unknown
+    },
+    {
+      name <- "unknown"
+      step <- get_step(react$Recipe, name)
+      if (input$Unknown) {
+        if (is.null(step)) {
+          react$Recipe <- step_unknown(react$Recipe, all_nominal(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), new_level = "unknown")
+          }
+      } else
+        react$Recipe <- remove_step(react$Recipe, name)
     }
   )
 
   ###########################################################################
+  ##### Drop problem variance columns #####
   observeEvent(
-    input$Convert,
-    ##### Create new columns through conversion #####
+    input$Variance,
     {
-      shinyjs::toggleElement(id = "OneHot", condition = input$Convert)
-      if (input$Convert) {
-        react$Recipe <- step_dummy(react$Recipe, all_nominal(), -all_outcomes(),  one_hot = input$OneHot)
-      } else {
-        react$Recipe <- remove_step(react$Recipe, c("step_dummy"))
-      }
-    }
-  )
-
-
-
-  ###########################################################################
-  observeEvent(
-    input$Center,
-    ##### Center numeric columns #####
-    {
-      if (input$Center) {
-        react$Recipe <- step_center(react$Recipe, all_numeric(), -all_outcomes())
-      } else {
-        react$Recipe <- remove_step(react$Recipe, "step_center")
-      }
-    }
-  )
-
-  ###########################################################################
-  observeEvent(
-    input$Scale,
-    ##### Scale numeric columns #####
-    {
-      if (input$Scale) {
-        react$Recipe <- step_scale(react$Recipe, all_numeric(), -all_outcomes())
-      } else {
-        react$Recipe <- remove_step(react$Recipe, "step_scale")
-      }
-    }
-  )
-
-  ###########################################################################
-  observeEvent(
-    input$DimReduce,
-    ##### Dimensional Reduction #####
-    {
-      shinyjs::toggleElement(id = "VarThresh", condition = input$DimReduce %in% c("corr","pca"))
-      react$Recipe <- remove_step(react$Recipe, c("step_corr", "step_ica", "step_pls", "step_kpls", "step_isomap", "step_pca"))
-      if(input$DimReduce != "none") {
+      react$Recipe <- remove_step(react$Recipe, c("nzv", "zv"))
+      if (input$Variance != "none") {
         react$Recipe <- switch(
-          input$DimReduce,
-          "corr"   = step_corr(react$Recipe, all_numeric(), threshold = input$VarThresh),
-          "ica"    = step_ica(react$Recipe, all_numeric(), -all_outcomes(), num_comp = 99),
-          "pls"    = step_pls(react$Recipe, all_numeric(), -all_outcomes(), num_comp = 99) ,
-          "kpls"   = step_kpca(react$Recipe, all_numeric(), -all_outcomes(), num_comp = 99, options = list(kernel = "rbfdot", kpar = list(sigma = 0.2))),
-          "isomap" = step_isomap(react$Recipe, all_numeric(), -all_outcomes(), num_comp = 99),
-          "pca"    = step_pca(react$Recipe, all_numeric(), -all_outcomes(), threshold = input$VarThresh, options = list(retx = FALSE, center = TRUE, scale. = input$Scale, tol = NULL))
+          input$Variance,
+          "zv"    = step_zv(react$Recipe, all_predictors()),
+          "nzv"   = step_nzv(react$Recipe, all_predictors(), freq_cut = 95/5, unique_cut = 10)
         )
       }
     }
   )
 
-
   ###########################################################################
+  ##### Accumulate Other level #####
   observeEvent(
-    input$DateFeatures,
-    ##### Create new columns from Date columns #####
     {
-      react$Recipe <- remove_step(react$Recipe, c("step_date"))
-      if (length(input$DateFeatures) > 0) {
-        react$Recipe <- step_date(react$Recipe, all_predictors(), -all_nominal(), -all_numeric(), features = input$DateFeatures)
+      input$Other
+      input$OtherThreshold
+    },
+    {
+      name <- "other"
+      step <- get_step(react$Recipe, name)
+      if (input$Other) {
+        if (is.null(step)) {
+          react$Recipe <- step_other(react$Recipe, all_nominal(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), threshold = input$OtherThreshold/100, other = "other")
+        } else {
+          rec <- react$Recipe
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], threshold = input$OtherThreshold/100)
+          react$Recipe <- rec
+        }
+      } else {
+        react$Recipe <- remove_step(react$Recipe, name)
       }
     }
   )
+
+  ###########################################################################
+  ##### Create new columns through conversion #####
+  observeEvent(
+    {
+      input$Convert
+      input$OneHot
+    },
+    {
+      name <- "dummy"
+      step <- get_step(react$Recipe, name)
+      hc <- react$HighCardinality
+      if (input$Convert) {
+        if (is.null(step)) {
+          react$Recipe <- step_dummy(react$Recipe, all_nominal(), -has_role("high cardinality"), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), one_hot = input$OneHot)
+        } else {
+          rec <- react$Recipe
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], one_hot = input$OneHot)
+          react$Recipe <- rec
+        }
+      } else
+        react$Recipe <- remove_step(react$Recipe, name)
+    }
+  )
+
+  ###########################################################################
+  ##### Center numeric columns #####
+  observeEvent(
+    input$Center,
+    {
+      if (input$Center) {
+        react$Recipe <- step_center(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+      } else {
+        react$Recipe <- remove_step(react$Recipe, "center")
+      }
+    }
+  )
+
+  ###########################################################################
+  ##### Scale numeric columns #####
+  observeEvent(
+    input$Scale,
+    {
+      if (input$Scale) {
+        react$Recipe <- step_scale(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+      } else {
+        react$Recipe <- remove_step(react$Recipe, "scale")
+      }
+    }
+  )
+
+  ###########################################################################
+  ##### Text Features #####
+  observeEvent(
+    {
+      input$text
+    },
+    {
+      name <- "textfeature"
+      step <- get_step(react$Recipe, name)
+      if (input$text) {
+        if (is.null(step)) {
+          react$Recipe <- step_textfeature(react$Recipe, has_type("character"), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), extract_functions = textfeatures::count_functions)
+        }
+      } else {
+        react$Recipe <- remove_step(react$Recipe, name)
+      }
+    }
+  )
+
+  ###########################################################################
+  ##### Encode text features #####
+  observeEvent(
+    {
+      getDataSummary()
+      react$RecipeChanged
+    },
+    {
+      ds <- getDataSummary()
+      cols <- rownames(ds)[ds$text]
+      colsx <- cols[!cols %in% c(getNonPredictors(), input$Target)]
+      toggleElement(id = "text", condition = length(colsx) > 0)
+    }
+  )
+
+  #####
+  observeEvent(
+    {
+      getContinuousDebounced()
+      input$Target
+      getDataSummary()
+      react$RecipeChanged
+    },
+    {
+      req(input$Target != "")
+      ds <- getDataSummary()
+      req(input$Target %in% rownames(ds))
+      cols <- rownames(ds)[ds$text | (ds$factor & ds$uniqueness > getContinuousDebounced()[1])]
+      colsx <- cols[!cols %in% c(getNonPredictors(), input$Target)]
+      highCard <- length(colsx) > 0
+      react$HighCardinality <- colsx
+      toggleElement(id = "String", condition = highCard)
+      if (!highCard) {
+        choices = list("None" = "none")
+      } else if (!ds[input$Target, "numeric"] & ds[input$Target, "uniqueness"] != 2) {
+        choices = list("None" = "none", "Omit" = "omit", "Hash encoding" = "hash")
+      } else if (ds[input$Target, "uniqueness"] != 2) {
+        choices = list("None" = "none", "Omit" = "omit", "Mean encoding" = "mean", "Hash encoding" = "hash", "Embedded encoding" = "embed", "Binary encoding" = "binary")
+      } else {
+        choices = list("None" = "none", "Omit" = "omit", "Weight-of-evidence encoding" = "woe", "Mean encoding" = "mean", "Hash encoding" = "hash", "Embedded encoding" = "embed", "Binary encoding" = "binary")
+      }
+      updateSelectInput(session = session, inputId = "String", choices = choices, selected = choices[1])
+    }
+  )
+
+  ##### String encoding #####
+  observeEvent(
+    {
+      input$String
+      react$HighCardinality
+      input$Target
+      react$RecipeChanged
+      # getContinuousDebounced()
+    },
+    {
+      colsx <- react$HighCardinality
+      req(length(colsx) > 0)
+      react$Recipe <- remove_step(react$Recipe, c("rm_HC", "woe", "lencode_mixed", "tokenize","tokenfilter", "texthash", "zv_HC", "embed","binary"))
+      if (input$String != "none") {
+        react$Recipe <- switch(
+          input$String,
+          "omit" = {
+            step_rm(react$Recipe, has_role("high cardinality"), id = rand_id("rm_HC"))
+          },
+          "woe" = {
+            step_woe(react$Recipe, has_role("high cardinality"), outcome = input$Target)
+          },
+          "mean" = {
+            step_lencode_mixed(react$Recipe, has_role("high cardinality"), outcome = input$Target, id = rand_id("lencode_mixed") ) #bug has wrong id default
+          },
+          # "****hash" = {
+          #   name <- "texthash"
+          #   step <- get_step(react$Recipe, name)
+          #   if (is.null(step)) {
+          #     pattern <- paste0(colsx, "_hash")
+          #     react$Recipe %>%
+          #       step_tokenize(has_role("high cardinality")) %>%
+          #       #step_stem(colsx) %>%
+          #       #step_stopwords(colsx) %>%
+          #       step_tokenfilter(has_role("high cardinality"), max_tokens = 50) %>%
+          #       ######step_tf(colsx) %>%
+          #       ######step_tfidf(colsx) %>%
+          #       step_texthash(has_role("high cardinality"), num_terms = input$NumTerms) %>%
+          #       step_zv(tidyselect::starts_with(pattern), id = rand_id("zv_HC"))   ##some new vars can be constant
+          #   } else {
+          #     rec <- react$Recipe
+          #     rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_terms = input$NumTerms)
+          #     rec
+          #   }
+          # },
+          "hash" = {
+            name <- "feature_hash"
+            step <- get_step(react$Recipe, name)
+            if (is.null(step)) {
+              react$Recipe %>%
+                embed::step_feature_hash(has_role("high cardinality"), num_hash = input$NumTerms)
+            } else {
+              rec <- react$Recipe
+              rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_hash = input$NumTerms)
+              rec
+            }
+          },
+          "embed" = {
+            name <- "embed"
+            step <- get_step(react$Recipe, name)
+            if (is.null(step)) {
+              step_embed(react$Recipe, has_role("high cardinality"), outcome = input$Target, num_terms = input$NumTerms) #TODO assign embed_control
+            } else {
+              rec <- react$Recipe
+              rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_terms = input$NumTerms)
+              rec
+            }
+          },
+          "binary" = {
+            name <- "binary"
+            step <- get_step(react$Recipe, name)
+            if (is.null(step)) {
+              step_binary(react$Recipe, has_role("high cardinality"), limit = 1000)
+            }
+          }
+        )
+      }
+    }
+  )
+
+  observeEvent(
+    {
+      input$MissingObs
+      input$MissObsThreshold
+    },
+    {
+      name <- "missingObs"
+      step <- get_step(react$Recipe, name)
+      if (input$MissingObs) {
+        if (is.null(step)) {
+          react$Recipe <- step_missingObs(react$Recipe, all_predictors(), ratio = input$MissObsThreshold/100)
+        } else {
+          rec <- react$Recipe
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], ratio = input$MissObsThreshold/100)
+          react$Recipe <- rec
+        }
+      } else
+        react$Recipe <- remove_step(react$Recipe, name)
+    }
+  )
+
+  ###########################################################################
+  # hide/show recipe controls and set choices
+    observe({
+    shinyjs::toggleElement(id = "Balance", condition = input$ProbType == "Classification" & !input$AddWeights)
+    shinyjs::toggleElement(id = "FeatureSelection", condition = input$Target != "")
+    if (input$Target == "") {
+      choices = list("None" = "none", "Correlation" = "corr", "PCA" = "pca", "ICA" = "ica", "IsoMap" = "isomap")
+    } else {
+      choices <- list("None" = "none", "PLS (sup)" = "pls", "UMAP (sup)" = "umap", "Correlation" = "corr", "PCA" = "pca", "ICA" = "ica", "IsoMap" = "isomap", "kPCA" = "kpca")
+    }
+    updateSelectInput(session = session, inputId = "DimReduce", choices = choices, selected = input$DimReduce)
+    if (input$ProbType ==  "Classification") {
+      shinyjs::showElement(id = "Centers")
+    } else {
+      shinyjs::hideElement(id = "Centers")
+    }
+  })
+
+  ###########################################################################
+  ##### Dimensional Reduction #####
+
+  observeEvent(
+    {
+      input$DimReduce
+      input$CorrThresh
+      input$NumComp
+      input$VarThresh
+    },
+    {
+      name <- paste(sep = "_", "step", input$DimReduce)
+      if (input$DimReduce != "none") {
+        step <- get_step(react$Recipe, name)
+        if (is.null(step)) {
+          react$Recipe <- remove_step(react$Recipe, c("corr", "ica", "pls", "umap", "kpca", "isomap", "pca"))
+          target <- input$Target
+          react$Recipe <- switch(input$DimReduce,
+                                 "corr"   = step_corr(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), threshold = input$CorrThresh),
+                                 "ica"    = step_ica(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), num_comp = input$NumComp),
+                                 "pls"    = step_pls(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), outcome = target, num_comp = input$NumComp),
+                                 "umap"   = step_umap(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), outcome = target, num_comp = input$NumComp),
+                                 "kpca"   = step_kpca(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), num_comp = input$NumComp, options = list(kernel = "rbfdot", kpar = list(sigma = 0.2))),
+                                 "isomap" = step_isomap(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), num_terms = input$NumComp),
+                                 "pca"    = step_pca(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), threshold = input$VarThresh, options = list(retx = FALSE, center = TRUE, scale. = input$Scale, tol = NULL))
+          )
+        } else {
+          rec <- react$Recipe
+          react$Recipe <- switch(input$DimReduce,
+                                 "corr"   = rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], threshold = input$CorrThresh),
+                                 "ica"    = rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_comp = input$NumComp),
+                                 "pls"    = rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_comp = input$NumComp),
+                                 "umap"   = rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_comp = input$NumComp),
+                                 "kpca"   = rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_comp = input$NumComp),
+                                 "isomap" = rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], num_comp = input$NumComp),
+                                 "pca"    = rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], threshold = input$VarThresh)
+          )
+          react$Recipe <- rec
+        }
+      } else
+        react$Recipe <- remove_step(react$Recipe, c("corr", "ica", "pls", "umap", "kpca", "isomap", "pca"))
+    }
+  )
+
+  ###########################################################################
+  ##### Polynomial expansion #####
+  observeEvent(
+    {
+      input$Poly
+      input$PolyDegree
+    },
+    {
+      react$Recipe <- remove_step(react$Recipe, c("poly"))
+      if (input$Poly) {
+        react$Recipe <- step_poly(react$Recipe, all_predictors(), -all_nominal(), degree = input$PolyDegree)
+      }
+    }
+  )
+  observeEvent(
+    input$PolyDegree,
+    {
+      if (input$Poly) {
+        rec <- react$Recipe
+        if (!is.null(input$PolyDegree)) {
+          step <- get_step(react$Recipe, "poly")
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], degree = input$PolyDegree)
+        }
+        react$Recipe <- rec
+      }
+    }
+  )
+
+  ##########################################################################
+  ##### Feature select columns #####
+  observeEvent(
+    input$FeatureSelection,
+    {
+      if (input$FeatureSelection) {
+        react$Recipe <- step_select_boruta(react$Recipe, all_predictors(), outcome = input$Target, parallel = input$Parallel)
+      } else {
+        react$Recipe <- remove_step(react$Recipe, "select_boruta")
+      }
+    }
+  )
+  observeEvent(
+    input$Parallel,
+    {
+      if (input$FeatureSelection) {
+        rec <- react$Recipe
+        if (!is.null(input$Parallel)) {
+          step <- get_step(react$Recipe, "FeatureSelection")
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], parallel = input$Parallel)
+        }
+        react$Recipe <- rec
+      }
+    }
+  )
+
+
+  ##########################################################################
+  ##### Clusters #####
+  observeEvent(
+    input$Clusters,
+    {
+      if (input$Clusters) {
+        react$Recipe <- step_dbscan(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), eps = input$Eps)
+      } else {
+        react$Recipe <- remove_step(react$Recipe, "dbscan")
+      }
+    }
+  )
+  ##########################################################################
+  observeEvent(
+    input$Eps,
+    {
+      if (input$Clusters) {
+        rec <- react$Recipe
+        if (!is.null(input$Eps)) {
+          step <- get_step(react$Recipe, "dbscan")
+          rec$steps[[step]] <- recipes:::update.step(rec$steps[[step]], eps = input$Eps)
+        }
+        react$Recipe <- rec
+      }
+    }
+  )
+
+  ##########################################################################
+  ##### Clusters #####
+  observeEvent(
+    input$Centers,
+    {
+      if (input$Centers) {
+        react$Recipe <- step_classdist(react$Recipe, all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"), class = input$Target)
+      } else {
+        react$Recipe <- remove_step(react$Recipe, "classdist")
+      }
+    }
+  )
+
+  ###########################################################################
+  ##### Create new columns from Date columns #####
+  observeEvent(
+    {
+      input$DateFeatures
+      input$Cyclic
+    },
+    {
+      react$Recipe <- remove_step(react$Recipe, c("cyclic"))
+      react$Recipe <- remove_step(react$Recipe, c("date"))
+      if (length(input$DateFeatures) > 0) {
+        react$Recipe <- step_date(react$Recipe, has_type("date"), -has_role("case weight"), -has_role("presplit"), -has_role("group"), features = input$DateFeatures, label = TRUE, ordinal = TRUE)
+        if (input$Cyclic) {
+          react$Recipe <- step_cyclic(react$Recipe, ends_with("_dow"), ends_with("_month"), -all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+        }
+      }
+    },
+    ignoreNULL = FALSE
+  )
+
+  ###########################################################################
+  ##### Create new columns from ordered factor columns #####
+  observeEvent(
+    input$Cyclic,
+    {
+      react$Recipe <- remove_step(react$Recipe, c("cyclic"))
+      if (input$Cyclic & length(input$DateFeatures) > 0) {
+        react$Recipe <- step_cyclic(react$Recipe, ends_with("_dow"), ends_with("_month"), -all_numeric(), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+      }
+    }
+  )
+  ###########################################################################
+  getSomeTrainData <- reactive({
+    d <- getTrainData()
+    if (input$ID != "" & input$ID %in% colnames(d)) {
+      rownames(d) <- d[, input$ID]
+    }
+    mrows <- getMaxRowsDebounced()
+    if (nrow(d) <= mrows) {
+      return(d)
+    } else {
+      rows <- sample(nrow(d), mrows)
+      #preserve order
+      rows <- sort(rows, decreasing = FALSE)
+      return(d[rows,])
+    }
+  })
 
   ###########################################################################
   getPrepRecipe <- reactive({
     req(is(react$Recipe, "recipe"))
+    tempRec <- step_naomit(react$Recipe, all_outcomes(), skip = TRUE)
+    #safe guard the recipe
+    if (any(tempRec$var_info$type == "date" & tempRec$var_info$role == "predictor")) {
+      tempRec <- step_rm(tempRec, has_type("date"),-has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group"))
+    }
     tryCatch({
-      recipes::prep(react$Recipe, verbose = Verbose, retain = TRUE)
+      recipes::prep(tempRec, verbose = Verbose, retain = TRUE, training = getSomeTrainData())
     }, error = function(e) {
-      e$message
+      print(e$message)
     })
   })
 
@@ -1075,242 +2790,498 @@ shinyServer(function(input, output, session) {
   getPreProcTrain <- reactive({
     prepRecipe <- getPrepRecipe()
     req(class(prepRecipe) == "recipe")
-    recipes::juice(prepRecipe, everything(), composition = "data.frame")
+    d <- recipes::juice(prepRecipe, everything(), composition = "data.frame")
+    # converts >= 15 unique levels to character
+    charCols <- which(allClass(d) == "factor")
+    max <- nrow(d)
+    for (col in charCols) {
+      if (length(unique(d[,col])) >  getContinuousDebounced()[1]) {
+        d[,col] <- as.character(d[,col])
+      }
+    }
+    d
   })
 
-  # ###########################################################################
-  # getPreProcTest <- reactive({
-  #   prepRecipe <- getPrepRecipe()
-  #   req(class(prepRecipe) == "recipe")
-  #   recipes::bake(prepRecipe, everything(), new_data = getTestData(), composition = "data.frame")
-  # })
+  ###########################################################################
+  output$RecipeErr <- renderInfoBox({
+    prepRecipe <- getPrepRecipe()
+    req(is(prepRecipe, "character")) 
+    infoBox(title = "Recipe Error", value = prepRecipe, icon = icon("exclamation-circle"), color = "olive", fill = TRUE)
+  })
+  
+  ###########################################################################
+  getMissingCount <- reactive({
+    d <- getPreProcTrain()
+    d <- d[,!colnames(d) %in% getNonPredictors()]
+    sum(is.na(d))
+  })
 
   ###########################################################################
+  output$MissPresent <- renderInfoBox({
+    req(getMissingCount() > 0)
+    text <- "Missing values are not all resolved"
+    infoBox(title = "Missing values", value = text, icon = icon("stethoscope"), color = "olive", fill = TRUE)
+  })
+  
+  getNominalCount <- reactive({
+    d <- getPreProcTrain()
+    d <- d[,!colnames(d) %in% c(input$Target, getNonPredictors())]
+    noms <- unlist(lapply(d, FUN = is.factor))
+    sum(noms)
+  })
+  
+  ###########################################################################
+  output$NominalPresent <- renderInfoBox({
+    req(getNominalCount() > 0)
+    text <- "Nominal variables are not all resolved"
+    infoBox(title = "Nominal variables", value = text, icon = icon("calendar-alt"), color = "olive", fill = TRUE)
+  })
+
+  ###########################################################################
+  getStringCount <- reactive({
+    d <- getPreProcTrain()
+    d <- d[,!colnames(d) %in% getNonPredictors()]
+    chars <- unlist(lapply(d, FUN = is.character))
+    sum(chars)
+  })
+  
+  ###########################################################################
+  output$StringPresent <- renderInfoBox({
+    req(getStringCount() > 0)
+    text <- "Character variables are not all resolved"
+    infoBox(title = "Character variables", value = text, icon = icon("fire-extinguisher"), color = "olive", fill = TRUE)
+  })
+
+
+  ###########################################################################
+  getNZVCount <- reactive({
+    d <- getPreProcTrain()
+    d <- d[,!colnames(d) %in% getNonPredictors()]
+    cols <- caret::nearZeroVar(d, freqCut = 95/5, uniqueCut = 10, names = TRUE)
+    length(cols)
+  })  
+  
+  ###########################################################################
+  output$NZVPresent <- renderInfoBox({
+    cols <- getNZVCount()
+    req(cols > 0)
+    text <- paste(cols, collapse = ", ")
+    infoBox(title = "Near zero variance present", value = text, icon = icon("bell"), color = "olive", fill = TRUE)
+  })
+
+  ###########################################################################
+  getLinCombCount <- reactive({
+    d <- getPreProcTrain()
+    d <- d[, numericNames(d)]
+    req(ncol(d) > 0)
+    d <- d[,!colnames(d) %in% getNonPredictors()]
+    d <- na.omit(d)
+    lc <- list(remove = c())
+    tryCatch(
+      {
+        zerovar <- diag(var(d)) == 0
+        lc$remove <- zerovar
+        lc <- caret::findLinearCombos(d)
+      },
+      error = function(e) {}
+    )
+    cols <- colnames(d)[lc$remove]
+    length(cols)
+  })
+  
+  ###########################################################################
+  output$LinCombPresent <- renderInfoBox({
+    cols <- getLinCombCount()
+    req(cols > 0)
+    text <- paste(cols, collapse = ", ")
+    infoBox(title = "Linear combinations present", value = text, icon = icon("bell"), color = "olive", fill = TRUE)
+  })
+  
+  ###########################################################################
+  output$Imbalanced <- renderInfoBox({
+    req(input$ProbType == "Classification")
+    d <- getPreProcTrain()
+    req(ncol(d) > 0, input$Target != "")
+    d2 <- d[, input$Target, drop = TRUE]
+    if (input$Weights != "") {
+      dd <- data.frame( target = d[, input$Target, drop = TRUE], weight = d[, input$Weights, drop = TRUE])
+      tab <- dplyr::count(x = dd, target, wt = weight)
+      t <- tab$n
+      names(t) <- as.character(tab$target)
+    } else {
+      t <- base::table(d2)
+    }
+    percRange <- (max(t) - min(t)) / sum(t) * 100
+    req(percRange > 5)
+    text <- paste0(input$Target, " is ", round(percRange), "% imbalanced")
+    infoBox(title = "Outcome imbalance", value = text, icon = icon("balance-scale-right"), color = "olive", fill = TRUE)
+  })
+
+  getVORatio <- reactive({
+    leaveOut <- c(getNonPredictors(), input$Target)
+    p <- getPreProcTrain()
+    p <- p[, !colnames(p) %in% leaveOut]
+    d <- getTrainData()
+    nrow(d) / ncol(p)
+  })
+  
+  ###########################################################################
+  output$VariablesRatio <- renderInfoBox({
+    ratio <- getVORatio()
+    req(ratio < 50)
+    text <- paste("The ratio of observations to variables is", round(ratio))
+    infoBox(title = "Inadequate observations", value = text, icon = icon("balance-scale-left"), color = "olive", fill = TRUE)
+  })
+  
+  ###########################################################################
+  output$VariablesPresent <- renderInfoBox({
+    d <- getPreProcTrain()
+    v <- colnames(d)
+    v <- setdiff(v, c(input$Target, getNonPredictors()))
+    text <- paste("There are", length(v), "predictor variables")
+    infoBox(title = "After recipe processing", value = text, icon = icon("sort-amount-down-alt"), color = "olive", fill = TRUE)
+  })
+  
+  ###########################################################################
   output$PreProcSummary <- renderPrint({
-    getPrepRecipe()
+    print(getPrepRecipe(), form_width = 150)
   })
 
   ###########################################################################
   output$ProcessedDataSummary <- renderUI({
-    print(summarytools::dfSummary(getPreProcTrain()),
-          method = 'render',
-          omit.headings = TRUE,
-          bootstrap.css = FALSE)
+    summary <- summarytools::dfSummary(getPreProcTrain(), graph.magnif = 1.5)
+    summarytools::view(summary,
+                       method = 'render',
+                       report.title = NA,
+                       headings = FALSE,
+                       bootstrap.css = TRUE,
+                       footnote = NA,
+                       max.tbl.height = 600,
+                       collapse = 1,
+                       silent = TRUE
+    )
   })
 
   ###########################################################################
   output$PreProcTable <- DT::renderDataTable({
     d <- getPreProcTrain()
-    dt <- DT::datatable(data = d, rownames = TRUE, selection = "none")
-    numeric <- which(allClass(d) == "numeric")
-    if (length(numeric) > 0) {
-      dt <- formatRound(table = dt, columns = numeric, digits = 2)
+    dt <- DT::datatable(data = d, rownames = TRUE, selection = "none",
+                        extensions = c('Scroller','FixedHeader'),
+                        options = list(
+                          scrollX = TRUE,
+                          deferRender = TRUE,
+                          scrollY = 540,
+                          scroller = TRUE
+                        ))
+    numericCols <- colnames(d)[unlist(lapply(d, is.numeric))]
+    integerCols <- colnames(d)[unlist(lapply(d, is.wholenumber))]
+    numericCols <- setdiff(numericCols, integerCols)
+    if (length(numericCols) > 0) {
+      dt <- formatRound(table = dt, columns = numericCols, digits = 2)
+    }
+    if (length(integerCols) > 0) {
+      dt <- formatRound(table = dt, columns = integerCols, digits = 0)
     }
     dt
   }, server = TRUE)
 
   ###########################################################################
-  getModels <- reactive({
+  getMethods <- reactive({
     input$RefreshModels
+    updateCheckboxInput(session = session, inputId = "OutliersTag", value = FALSE)
     mi <- getModelInfo()
 
-    # correction to model info
+    # corrections to model info
     mi[["chaid"]]$tags <- c(mi[["chaid"]]$tags, "Categorical Predictors Only")
-
-    Label <- vector(mode="character", length = length(mi))
-    Library <- vector(mode="character", length = length(mi))
-    Hyperparams <- vector(mode="character", length = length(mi))
-    Regression <- vector(mode="logical", length = length(mi))
-    Classification <- vector(mode="logical", length = length(mi))
-    Tags <- vector(mode="character", length = length(mi))
-    ClassProbs <- vector(mode="character", length = length(mi))
-    for (row in 1:length(mi)){
+    mi[["plsRglm"]]$tags <- gsub(pattern  = "Generalized Linear Models", replacement = "Generalized Linear Model", x = mi[["plsRglm"]]$tags)
+    Label <- vector(mode = "character", length = length(mi))
+    Packages <- vector(mode = "character", length = length(mi))
+    Hyperparams <- vector(mode = "character", length = length(mi))
+    Regression <- vector(mode = "logical", length = length(mi))
+    Classification <- vector(mode = "logical", length = length(mi))
+    Tags <- vector(mode = "character", length = length(mi))
+    ClassProbs <- vector(mode = "character", length = length(mi))
+    for (row in 1:length(mi)) {
       Label[row] <- mi[[row]]$label
       libs <- mi[[row]]$library
       libs <- na.omit(libs[libs != ""]) # remove blank libraries
       if (length(libs) > 0) {
-        present <- vector(mode="logical", length = length(libs))
+        present <- vector(mode = "logical", length = length(libs))
         suppressWarnings({
           for (lib in 1:length(libs)) {
             present[lib] <- require(package = libs[lib], warn.conflicts = FALSE, character.only = TRUE, quietly = TRUE)
           }
         })
         check <- ifelse(present, "", as.character(icon(name = "ban")))
-        Library[row] <- paste(collapse="<br/>", paste(mi[[row]]$library, check))
+        Packages[row] <- paste(collapse = "<br/>", paste(mi[[row]]$library, check))
       }
       d <- mi[[row]]$parameters
-      Hyperparams[row] <- paste(collapse="<br/>", paste0(d$parameter, " - ", d$label, " [", d$class,"]"))
+      Hyperparams[row] <- paste(collapse = "<br/>", paste0(d$parameter, " - ", d$label, " [", d$class,"]"))
       Regression[row] <- ifelse("Regression" %in% mi[[row]]$type, as.character(icon("check-square", class = "fa-3x")), "")
       Classification[row] <- ifelse("Classification" %in% mi[[row]]$type , as.character(icon("check-square", class = "fa-3x")),"")
-      Tags[row] <- paste(collapse="<br/>", mi[[row]]$tags)
-      ClassProbs <- ifelse(is.function(mi[[row]]$prob), as.character(icon("check-square", class = "fa-3x")), "")
+      Tags[row] <- paste(collapse = "<br/>", mi[[row]]$tags)
+      ClassProbs[row] <- ifelse(is.function(mi[[row]]$prob), as.character(icon("check-square", class = "fa-3x")), "")
     }
-    m <- data.frame(Model = names(mi), Label, Library, Regression, Classification, Tags, Hyperparams, ClassProbs, stringsAsFactors = FALSE)
-    m[sample(nrow(m)),] # randomise the rows so the sames models are not always at the top
+    m <- data.frame(Model = names(mi), Label, Packages, Regression, Classification, Tags, Hyperparams, ClassProbs, stringsAsFactors = FALSE)
+    m[sample(nrow(m)),] # randomise the rows so the same methods are not always at the top
+  })
+
+  ###########################################################################
+  getTags <- reactive({
+    Tags <- getMethods()$Tags
+    unique(unlist(strsplit(x = Tags, split = "<br/>", fixed = TRUE)))
   })
 
   ###########################################################################
   observe({
+    tags <- getTags()
+    updateSelectInput(session = session, inputId = "IncFeatures", choices = setdiff(tags, input$ExcFeatures), selected = input$IncFeatures)
+    updateSelectInput(session = session, inputId = "ExcFeatures", choices = setdiff(tags, input$IncFeatures), selected = input$ExcFeatures)
+  })
+
+  ###########################################################################
+  observe({
+    req(input$ProbType)
     if (input$ProbType == "Classification") {
       showElement(id = "BiClass")
       showElement(id = "Probs")
-      showElement(id = "CatPredictors")
-      hideElement(id = "DimReduction")
     } else {
       hideElement(id = "BiClass")
       hideElement(id = "Probs")
-      hideElement(id = "CatPredictors")
-      showElement(id = "DimReduction")
     }
   })
 
   ###########################################################################
   observe({
-    d <- getData()
-    req(d, input$Class, input$Class %in% colnames(d))
-    lvls <- length(unique(d[, input$Class]))
-    if (input$ProbType == "Classification" && lvls == 2) {
-      updateSelectInput(session = session, inputId = "HypMetric", choices = c(clasChoices, biClasChoices), selected = clasChoices[1])
-    } else if (input$ProbType == "Classification" && lvls != 2) {
-      updateSelectInput(session = session, inputId = "HypMetric", choices = clasChoices, selected = clasChoices[1])
+    req(input$ProbType)
+    req(!is.null(react$Prob2Class), length(react$Prob2Class) > 0)
+    if (input$ProbType == "Classification" && react$Prob2Class) {
+      updateSelectInput(session = session, inputId = "HypMetric", choices = biClassChoices, selected = biClassChoices[1])
+    } else if (input$ProbType == "Classification") {
+      updateSelectInput(session = session, inputId = "HypMetric", choices = multiClassChoices, selected = multiClassChoices[1])
     } else {
       updateSelectInput(session = session, inputId = "HypMetric", choices = regChoices, selected = regChoices[1])
     }
   })
 
   ###########################################################################
-  getFiltModels <- reactive({
-    d <- getModels()
+  getFiltMethods <- reactive({
+    req(input$ProbType)
+    d <- getMethods()
+    if (input$AvailPackages) {
+      d <- d[ !grepl(pattern = "<i class", d$Packages), ]
+    }
+
     d <- switch(input$ProbType,
                 "Classification" = d[ d$Classification != "", ],
                 "Regression" = d[ d$Regression != "", ],
                 "Any" = d
     )
+    if (input$TwoClassTag) {
+      d <- d[ !grepl(pattern = "Ordinal Outcomes", d$Tags, ignore.case = TRUE), ]
+    } else {
+      d <- d[ !grepl(pattern = "Two Class Only", d$Tags, ignore.case = TRUE), ]
+    }
 
-    #     what about "Binary Predictors Only"? TODO
-    d <- switch(input$BiClass,
-                "Only" = d[ grepl(pattern = "Two Class Only", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Two Class Only", d$Tags), ],
-                "Neutral" = d
+    d <- switch(input$PredictorsTag,
+                "All Nominal" = d[ !grepl(pattern = "Binary Predictors Only", d$Tags, ignore.case = TRUE), ],
+                "All Binary" = d[ !grepl(pattern = "Categorical Predictors Only", d$Tags, ignore.case = TRUE), ],
+                "Mixture" = d[ !grepl(pattern = "Categorical Predictors Only|Binary Predictors Only", d$Tags, ignore.case = TRUE), ]
     )
+    if (input$WeightingTag) {
+      d <- d[ grepl(pattern = "Accepts Case Weights", d$Tags, ignore.case = TRUE), ]
+    }
+    if (input$OutliersTag) {
+      d <- d[ grepl(pattern = "Robust", d$Tags, ignore.case = TRUE), ]
+    }
+    if (input$MissingTag) {
+      d <- d[ grepl(pattern = "Handle Missing Predictor Data", d$Tags, ignore.case = TRUE), ]
+    }
+    if (input$NominalsTag) {
+      d <- d[ grepl(pattern = "Tree-Based Model", d$Tags, ignore.case = TRUE), ]
+    }
+    if (input$LinCombTag | input$NZVTag) {
+      if (input$ProbType == "Regression") {
+        ols <- "Linear Regression"
+      } else {
+        ols <- "Linear Classify"
+      }
+      d <- d[ !grepl(pattern = ols, d$Tags, ignore.case = TRUE), ]
+    }
+    if (input$RatioTag) {
+      d <- d[ grepl(pattern = "Implicit Feature Selection|Feature Selection Wrapper", d$Tags, ignore.case = TRUE), ]
+    }
+    
+    if (input$ProbabilityTag) {
+        d <- d[ d$ClassProb != "", ]
+    }
 
-    d <- switch(input$Probs,
-                "Only" = d[ d$ClassProb != "", ],
-                "Avoid" = d[ d$ClassProb == "", ],
-                "Neutral" = d
-    )
-
-    d <- switch(input$CatPredictors,
-                "Only" = d[ grepl(pattern = "Categorical Predictors Only", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Categorical Predictors Only", d$Tags), ],
-                "Neutral" = d
-    )
-
-    d <- switch(input$Linearity,
-                "Only" = d[ grepl(pattern = "Linear", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Linear", d$Tags), ],
-                "Neutral" = d
-    )
-
-    d <- switch(input$Ensembled,
-                "Only" = d[ grepl(pattern = "Ensemble", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Ensemble", d$Tags), ],
-                "Neutral" = d
-    )
-
-    d <- switch(input$Regularisation,
-                "Only" = d[ grepl(pattern = "Regularization", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Regularization", d$Tags), ],
-                "Neutral" = d
-    )
-
-    d <- switch(input$Robustness,
-                "Only" = d[ grepl(pattern = "Robust Methods", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Robust Methods", d$Tags), ],
-                "Neutral" = d
-    )
-
-    d <- switch(input$Transparency,
-                "Only" = d[ grepl(pattern = "Rule-Based Model|Feature Extraction|Model Tree", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Rule-Based Model|Feature Extraction|Model Tree", d$Tags), ],
-                "Neutral" = d
-    )
-    d <- switch(input$Complexity,
-                "Only" = d[ grepl(pattern = "Kernel Method", d$Tags), ],
-                "Avoid" = d[ !grepl(pattern = "Kernel Method", d$Tags), ],
-                "Neutral" = d
-    )
-
-    if (input$AvailPackages) {
-      d <- d[ !grepl(pattern="<i class", d$Library), ]
+    if (length(input$IncFeatures) > 0) {
+      pat1 <- paste(sep = "", collapse = "|", input$IncFeatures, "(<br/>|$)")
+      d <- d[ grepl(pattern = pat1, d$Tags), ]
+    }
+    if (length(input$ExcFeatures) > 0) {
+      pat2 <- paste(collapse = "|", input$ExcFeatures, "(<br/>|$)")
+      d <- d[ !grepl(pattern = pat2, d$Tags), ]
     }
     d
   })
 
   ###########################################################################
+  observe({
+    input$RefreshModels
+    req(input$ProbType)
+    if (input$ProbType == "Classification") {
+      showElement(id = "ProbabilityTag")
+      showElement(id = "TwoClassTag")
+      ds <- getDataSummary()
+      uniqCnt <- ds[rownames(ds) == input$Target, "uniqueness"]
+      react$Prob2Class <- uniqCnt == 2
+      updateCheckboxInput(session = session, inputId = "TwoClassTag", value = uniqCnt == 2)
+      leaveOut <- c(input$Target, getNonPredictors())
+      factors <- ds[!rownames(ds) %in% leaveOut, "factor"]
+      binaries <- ds[!rownames(ds) %in% leaveOut, "binary"]
+      if (all(factors)) {
+        updateRadioButtons(session = session, inputId = "PredictorsTag", selected = "All Nominal")
+      } else if (all(binaries)) {
+        updateRadioButtons(session = session, inputId = "PredictorsTag", selected = "All Binary")
+      } else {
+        updateRadioButtons(session = session, inputId = "PredictorsTag", selected = "Mixture")
+      }
+    } else if (input$ProbType == "Regression") {
+      hideElement(id = "ProbabilityTag")
+      hideElement(id = "TwoClassTag")
+      updateRadioButtons(session = session, inputId = "BiClass", selected = "Neutral")
+      updateRadioButtons(session = session, inputId = "CatPredictors", selected = "Neutral")
+    } else {
+      showElement(id = "ProbabilityTag")
+      showElement(id = "TwoClassTag")
+    }
+    # Weightings
+    updateCheckboxInput(session = session, inputId = "WeightingTag", value = input$Weights != "")
+    # missing values
+    updateCheckboxInput(session = session, inputId = "MissingTag", value = (getMissingCount() > 0))
+    # Nominals present
+    updateCheckboxInput(session = session, inputId = "NominalsTag", value = (getNominalCount() > 0))
+    # NZV present
+    updateCheckboxInput(session = session, inputId = "NZVTag", value = (getNZVCount() > 0))
+    # Linear Combinations present
+    updateCheckboxInput(session = session, inputId = "LinCombTag", value = (getLinCombCount() > 0))
+    # Var to Obs ratio
+    updateCheckboxInput(session = session, inputId = "RatioTag", value = (getVORatio() < 50))
+  })
+
+  ###########################################################################
+  output$Methods <- renderInfoBox({
+    d <- getFiltMethods()
+    infoBox(title = "Available Methods", value = nrow(d), icon = icon("align-justify"), color = "red", fill = TRUE)
+  })
+
+  ###########################################################################
   observeEvent(input$ChooseAll, {
-    tableProxy <- dataTableProxy(outputId = "ModelTable", session = session)
-    selectRows(tableProxy, input$ModelTable_rows_all)
-  })
-
-  ###########################################################################
-  output$ModelTable <- DT::renderDataTable({
-      d <- getFiltModels()
-      DT::datatable(data = d, class='display', rownames = FALSE, selection = "multiple", escape = FALSE, options = list(
-        lengthMenu = list(c(5, 15, -1), c('5', '15', 'All')),
-        pageLength = 5
-      ))
-    })
-
-
-  ###########################################################################
-  getSelectedModels <- reactive({
-    getFiltModels()[input$ModelTable_rows_selected, ]
-  })
-
-
-  ###########################################################################
-  output$SelectedModelsTable <- renderTable({
-    getSelectedModels()[, c("Model", "Label")]
-  })
-
-  ###########################################################################
-  output$SelWarn <- renderText({
-    if (nrow(getSelectedModels()) == 0) {
-      "Select one or more models in the previous panel"
+    tableProxy <- dataTableProxy(outputId = "MethodsTable", session = session)
+    if (length(react$MethodSet) > 0) {
+      selectRows(proxy = tableProxy, selected = NULL) #this does not trigger the *_rows_selected event
+      react$MethodSet <- c()
+    } else {
+      selectRows(proxy = tableProxy, selected = 1:nrow(getFiltMethods()))
     }
   })
 
   ###########################################################################
-  getModelsDummyVars <- reactive({
-    data <- getFiltModels()
+  output$MethodsTable <- DT::renderDataTable({
+    d <- getFiltMethods()
+    if (input$ProbType %in% c("Classification","Regression")) {
+      d <- d[, !colnames(d) %in% c("Classification","Regression")]
+    }
+    if (input$ProbType == "Regression") {
+      d$ClassProbs <- NULL
+    }
+    d$Label <- str_wrap(d$Label, width = 25)
+    d$Label <- gsub(d$Label, pattern = "\n", replacement = "<p/>", fixed = TRUE)
+    preselection <- which(d[, "Model"] %in% isolate(react$MethodSet)) #use isolate because this is only setting the on-loading selected methods
+    DT::datatable(data = d, rownames = FALSE, selection = list(mode = "multiple", selected = preselection, target = "row"),
+                  extensions = c('Scroller','FixedHeader'),
+                  escape = FALSE,
+                  options = list(
+                    scrollX = TRUE,
+                    deferRender = TRUE,
+                    scrollY = 540,
+                    scroller = TRUE
+                  ))
+  })
+
+  ###########################################################################
+  observeEvent(input$MethodsTable_rows_selected, {
+    d <- getFiltMethods()
+    methodSet <- d[input$MethodsTable_rows_selected, "Model"]
+    if (!setequal(react$MethodSet, methodSet)) {
+      react$MethodSet <- methodSet
+    }
+  })
+
+  ###########################################################################
+  observeEvent(react$MethodSet, {
+    d <- getFiltMethods()
+    methodSet <- d[input$MethodsTable_rows_selected, "Model"]
+    if (!setequal(react$MethodSet, methodSet)) {
+      tableProxy <- dataTableProxy(outputId = "MethodsTable", session = session)
+      selected <- which(d[,"Model"] %in% react$MethodSet)
+      selectRows(proxy = tableProxy, selected = selected)
+    }
+  })
+
+  ###########################################################################
+  getSelectedMethodTable <- reactive({
+    d <- getFiltMethods()
+    d[d[, "Model"] %in% react$MethodSet, ]
+  })
+
+  ###########################################################################
+  output$SelectedMethodsTable <- renderTable({
+    getSelectedMethodTable()[, c("Model", "Label")]
+  })
+
+  ###########################################################################
+  output$SelWarn <- renderInfoBox({
+    d <- getSelectedMethodTable()
+    if (nrow(d) == 0) {
+      text <- "No methods selected yet"
+    } else if (nrow(d[grepl(pattern = "<i class", d$Packages),]) > 0) {
+      text <- "There are packages that need to be installed"
+    } else {
+      req(FALSE)
+    }
+    infoBox(title = "Method Selection", value = text, icon = icon("exclamation-circle"), fill = TRUE, color = "red")
+  })
+
+  ###########################################################################
+  getMethodsDummyVars <- reactive({
+    data <- getFiltMethods()
     req(nrow(data) > 1)
-    mat1 <- matrix(0, nrow = nrow(data), ncol = 2)
-    colnames(mat1) <- c("Regression", "Classifiaction")
+    mat1 <- matrix(0, nrow = nrow(data), ncol = 3)
+    colnames(mat1) <- c("Regression", "Classification","ClassProbs")
     mat1[,1] <- ifelse(data$Regression != "", 1, 0)
     mat1[,2] <- ifelse(data$Classification != "", 1, 0)
-
+    mat1[,3] <- ifelse(data$ClassProbs == "", 0, 1)
     tags <- unique(unlist(strsplit(x = data$Tags, split = "<br/>")))
     mat2 <- matrix(0, nrow = nrow(data), ncol = length(tags))
-    req(length(tags) >= 2)  # for 2D pc1 x pc2 chart
     colnames(mat2) <- tags
     for (t in 1:length(tags)) {
-      mat2[,t] <-ifelse ( grepl(pattern = tags[t], x = data$Tags, fixed = TRUE), 1, 0 )
+      mat2[,t] <- ifelse( grepl(pattern = tags[t], x = data$Tags, fixed = TRUE), 1, 0 )
     }
-    cbind(mat1,mat2)
+    mat <- cbind(mat1,mat2)
+    rownames(mat) <- data$Model
+    mat
   })
 
   ###########################################################################
   observe({
-    d <- getSelectedModels()
-    if (nrow(d) < 3) {
-      shinyjs::hideElement(id = "Suggest")
-    } else {
-      shinyjs::showElement(id = "Suggest")
-    }
+    d <- getSelectedMethodTable()
+    shinyjs::toggle(id = "Suggest", condition = nrow(d) >= 3)
     if (nrow(d) == 0) {
       shinyjs::hideElement(id = "Install")
-    } else if (nrow(d[grepl(pattern="<i class", d$Library),]) > 0) {
+    } else if (nrow(d[grepl(pattern = "<i class", d$Package),]) > 0) {
       shinyjs::showElement(id = "Install")
     } else {
       shinyjs::hideElement(id = "Install")
@@ -1318,79 +3289,160 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
+  getSelectedMethods <- reactive({
+    ml <- c()
+    if (length(react$MethodSet) > 0) {
+      ml <- react$MethodSet
+    }
+    if (input$NullModel) {
+      ml <- union("null", ml) # Add the null model
+    }
+    ml
+  })
+
+  ###########################################################################
   observeEvent(input$Install, {
-      d <- getSelectedModels()
-      req(nrow(d) > 0)
-      shinyjs::hideElement(id = "Install")
-      librs <- unlist(strsplit(d$Library, split="<br/>"))
-      librs <- librs[grepl(pattern = "<i.*>", x = librs)]
-      librs <- gsub(pattern = " +<.*>", replacement = "", x = librs)
-      for (lib in unique(librs)) {
-        if (!require(package = lib, character.only = TRUE)) {
-          try(silent = TRUE, expr = {
-            showNotification(paste("Installing package", lib), duration = NULL, id = lib)
-            install.packages(pkgs = lib, quiet = TRUE, warn.conflicts = TRUE, character.only = TRUE)
-            library(package = lib, character.only = TRUE, warn.conflicts = FALSE, quietly = TRUE)
-            removeNotification(id = lib)
-          })
-        }
+    d <- getSelectedMethods()
+    req(nrow(d) > 0)
+    shinyjs::hideElement(id = "Install")
+    librs <- unlist(strsplit(d$Library, split = "<br/>"))
+    librs <- librs[grepl(pattern = "<i.*>", x = librs)]
+    librs <- gsub(pattern = " +<.*>", replacement = "", x = librs)
+    for (lib in unique(librs)) {
+      if (!require(package = lib, character.only = TRUE)) {
+        try(silent = TRUE, expr = {
+          showNotification(paste("Installing package", lib), duration = NULL, id = lib)
+          install.packages(pkgs = lib, quiet = TRUE, warn.conflicts = TRUE, character.only = TRUE)
+          library(package = lib, character.only = TRUE, warn.conflicts = FALSE, quietly = TRUE)
+          removeNotification(id = lib)
+        })
       }
+    }
   }, ignoreInit = TRUE)
 
   ###########################################################################
   observeEvent(input$Suggest, {
-    req(length(input$ModelTable_rows_selected) > 2)
-    b <- as.data.frame(getModelsDummyVars())
-    picked <- b[input$ModelTable_rows_selected, ]
-    suggested <- caret::maxDissim(a = picked, b = b, method = input$DistMetric, n = 1)
-    tableProxy <- dataTableProxy(outputId = "ModelTable", session = session)
-    selected <- c(input$ModelTable_rows_selected, suggested)
-    selectRows(proxy = tableProxy, selected = selected)
+    req(length(react$MethodSet) > 2)
+    b <- as.data.frame(getMethodsDummyVars())
+    picked <- b[rownames(b) %in% react$MethodSet,]
+    suggested <- caret::maxDissim(a = picked, b = b, method = "euclidean", n = 1)
+    react$MethodSet <- union(react$MethodSet, rownames(b)[suggested])
   })
 
   ###########################################################################
-  get2Ddata <- reactive({
+  get2dData0 <- reactive({
+    data <- getMethodsDummyVars()
+    #calculate the distance of the tags (as binary)
+    d1 <- proxy::dist(data, method = "euclidean")
+    #calculate the distance between the names (too avoid overlap)
+    d2 <- stringdist::stringdistmatrix(a = rownames(data), method = "jw")
+    d <- d1 + 3 * d2
     # reduce to 2 PC and plot in xy
-    d <- dist(getModelsDummyVars(), method = input$DistMetric)
-    set.seed(input$ModelTable_rows_selected)
     d2d <- cmdscale(d, k = 2)
+    d2d <- as.data.frame(d2d)
     req(ncol(d2d) == 2) # can be less than 2 so check is needed
     colnames(d2d) <- c("PC1", "PC2")
-    rownames(d2d) <- getFiltModels()$Model
-    d2d <- as.data.frame(d2d)
-    d2d$Selected <- (1:nrow(d2d) %in% input$ModelTable_rows_selected)
+    d2d$Method <- rownames(d2d)
+    d2d$Type <- ifelse(data[, "Regression"] == 1 & data[,"Classification"] == 1, "Both", ifelse(data[,"Regression"] == 1, "Regression", "Classification"))
     d2d
   })
 
   ###########################################################################
-  output$D2D <- renderPlot({
+  get2Ddata <- reactive({
+    d2d <- get2dData0()
+    if (input$ProbType != "Any") {
+      d2d$Selected <- d2d$Method %in% react$MethodSet
+    }
+    d2d
+  })
+
+  ###########################################################################
+  output$D2plot <- renderPlot({
+    data <- get2Ddata()
+    P <- ggplot(data = data, mapping = aes(x = PC1, y = PC2)) +
+      theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+    if (input$ProbType == "Any") {
+      P <- P + geom_text(mapping = aes(label = Method, colour = Type), check_overlap = FALSE)
+    } else {
+      P <- P + geom_text(mapping = aes(label = Method, colour = Selected), check_overlap = FALSE)
+    }
+    P
+  }, bg = "transparent")
+
+  ###########################################################################
+  output$MapInfo <- renderUI({
+    # This code suits Chrome (and other) browser. It does NOT suit the RStudio browser
     d2d <- get2Ddata()
-    ggplot(data = d2d, mapping = aes(x = PC1, y = PC2, color = Selected)) +
-      ggtitle(label = "2D Representation of Model Types") +
-      geom_point() +
-      geom_text_repel(label = rownames(d2d)) +
-      theme(plot.title = element_text(lineheight=1, face="bold", hjust = 0.5))
+    hover <- input$MapHover
+    point <- nearPoints(d2d, hover, threshold = 15, maxpoints = 1)
+    if (nrow(point) == 0) return(NULL)
+    # calculate point position INSIDE the image as percent of total dimensions
+    # from left (horizontal) and from top (vertical)
+    left_pct <- (hover$x - hover$domain$left) / (hover$domain$right - hover$domain$left)
+    top_pct <- (hover$domain$top - hover$y) / (hover$domain$top - hover$domain$bottom)
+    # calculate distance from left and bottom side of the picture in pixels
+    left_px <- hover$range$left + left_pct * (hover$range$right - hover$range$left)
+    top_px <- hover$range$top + top_pct * (hover$range$bottom - hover$range$top)
+    # create style property for tooltip
+    # background color is set so tooltip is a bit transparent
+    # z-index is set so we are sure are tooltip will be on top
+    top_px <- (top_px + 60)
+    style <- paste0("position:absolute; z-index:100; background-color: rgba(225, 0, 0, 0.70); left:", left_px + 15, "px; top:", top_px + 2, "px;")
+    # actual tooltip created as wellPanel
+    data <- getFiltMethods()
+    method <- data[data$Model == point$Method,]
+    wellPanel(
+      style = style,
+      HTML(paste0(
+        tags$b(point$Method), "<br/>",
+        method$Label,
+        "<ul><li>", gsub(method$Tags, pattern = "<br/>", replacement = "</li><li>", fixed = TRUE), "</li></ul>")
+      )
+    )
+  })
+  
+  ###########################################################################
+  # output$MapPos <- renderUI({
+  #   hover <- input$MapClick
+  #   left_pct <- (hover$x - hover$domain$left) / (hover$domain$right - hover$domain$left)
+  #   top_pct <- (hover$domain$top - hover$y) / (hover$domain$top - hover$domain$bottom)
+  #   # calculate distance from left and bottom side of the picture in pixels
+  #   left_px <- hover$range$left + left_pct * (hover$range$right - hover$range$left)
+  #   top_px <- hover$range$top + top_pct * (hover$range$bottom - hover$range$top)
+  #   left_px <- (left_px + 8) * 0.8
+  #   top_px <- (top_px + 60) * 0.8
+  #   style <- paste0("position:absolute; z-index:100; background-color: rgba(225, 0, 0, 0.70); left:", left_px, "px; top:", top_px, "px;")
+  #   wellPanel(style = style, paste(left_px, top_px))
+  # })
+
+  ###########################################################################
+  observeEvent(input$MapDblClick, {
+    d2d <- get2Ddata()
+    point <- nearPoints(d2d, input$MapDblClick, threshold = 15, maxpoints = 1)
+    if (nrow(point) == 0) return(NULL)
+    isolate({
+      if (point$Method %in% react$MethodSet) {
+        # remove the method
+        methodset <- setdiff(react$MethodSet, point$Method)
+      } else {
+        # add the method
+        methodset <- c(react$MethodSet, point$Method)
+      }
+    })
+    react$MethodSet <- methodset
   })
 
   ###########################################################################
-  output$D2DTable <- renderTable({
-    req(input$D2D_brush)
-    names <- rownames(brushedPoints(df = get2Ddata(), brush = input$D2D_brush))
-    fm <- getFiltModels()
-    fm[fm$Model %in% names, c("Model","Label", "Tags", "Hyperparams")]
-  }, sanitize.text.function = function(x) x)
-
-  ###########################################################################
   observe({
-    shinyjs::toggle(id="Number", condition = input$Method != "none")
-    shinyjs::toggle(id="Repeats", condition = grepl("[d_]cv$", input$Method))
-    shinyjs::toggle(id="TuneLength", condition = input$Method != "none")
-    shinyjs::toggle(id="Balance", condition = input$ProbType == "Classification")
+    shinyjs::toggle(id = "Number", condition = input$Method != "none")
+    shinyjs::toggle(id = "Repeats", condition = grepl("[d_]cv$", input$Method))
+    shinyjs::toggle(id = "Balance", condition = input$ProbType == "Classification")
   })
 
   ###########################################################################
   observe({
-    if (grepl("cv", input$Method)) {
+    req(input$Method)
+    if (grepl("cv", input$Method, ignore.case = TRUE)) {
       updateNumericInput(session = session, inputId = "Number", label = "Number of CV folds", value = 10)
     } else {
       updateNumericInput(session = session, inputId = "Number", label = "Number of iterations", value = 25)
@@ -1398,65 +3450,98 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
+  observeEvent(input$Groups, {
+    if (input$Groups != "") {
+      updateSelectInput(session = session, inputId = "Method", label = "Method", choices = list("LGOCV",'adaptive_LGOCV'), selected = "LGOCV")
+    } else {
+      updateSelectInput(session = session, inputId = "Method", label = "Method", choices = list("boot", "boot632", "optimism_boot", "boot_all", "cv", "repeatedcv", "LOOCV", "adaptive_cv", "adaptive_boot"), selected = "boot")
+    }
+  })
+
+  ###########################################################################
+  getIndex <- reactive({
+    req(input$Method, input$ProbType)
+    data <- getTrainData()
+    req(isRoleValid(input$Target, data))
+    y <- data[,input$Target]
+    req(length(y) > 0)
+    #Prepare the resampling index (considering the effect on ensembling)
+    if (any(input$Method %in% c("boot632","boot","adaptive_boot"))) {
+      index <- caret::createResample(y, times = input$Number, list = TRUE)
+      react$AllowEnsemble <- TRUE
+    } else if (any(input$Method %in% c("cv","adaptive_cv"))) {
+      index  <- caret::createFolds(y, k = input$Number, list = TRUE, returnTrain = TRUE)
+      react$AllowEnsemble <- TRUE
+    } else if (input$Method == "repeatedcv") {
+      index <- caret::createMultiFolds(y, k = input$Number, times = input$Repeats)
+      react$AllowEnsemble <- TRUE
+    } else if (any(input$Method %in% c("LGOCV","adaptive_LGOCV"))) {
+      req(input$Groups != "")
+      group <- as.factor(data[, input$Groups])
+      index <- caret::groupKFold(group = group, k = min( c(input$Number, length(unique(group))) ))
+      react$AllowEnsemble <- TRUE
+    } else {
+      #c("optimism_boot", "boot_all", "LOOCV")
+      react$AllowEnsemble <- FALSE
+      index <- NULL
+    }
+    index
+  })
+
+  ###########################################################################
+  output$NearZeroVarTest <- renderInfoBox({
+    data <- getData()
+    index <- getIndex()
+    
+    wrap2 <- function(index, x) {
+      x <- (x[index, , drop = FALSE])
+      colnames(x)[apply(x, 2, function(x) length(unique(na.omit(x))) < 2)]
+    }
+    
+    columns <- unique(unlist(lapply(index, wrap2, x = data)))
+    req(length(columns) > 0)
+    text <- paste(columns, collapse = ", ")
+    infoBox(title = "Zero variance variables in one or more resample", value = text, icon = icon("dice"), color = "yellow", fill = TRUE)
+  })
+  
+  ###########################################################################
   getTrainControl <- reactive({
     req(input$Method)
     req(input$ProbType)
-    req(input$Class)
-    y <- getTrainData()[,input$Class]
-    req(length(y) > 0)
-
-    #Prepare the resampling index (considering the effect on ensembling)
-    if(any(input$Method %in% c("boot","adaptive_boot"))) {
-      index <- caret::createResample(y, times = input$Number, list = TRUE)
-      react$AllowEnsemble <- TRUE
-    } else if(any(input$Method %in% c("cv","adaptive_cv"))) {
-      index  <- caret::createFolds(y, k = input$Number, list = TRUE, returnTrain = TRUE)
-      react$AllowEnsemble <- TRUE
-    } else if(input$Method == "repeatedcv") {
-      index <- caret::createMultiFolds(y, k = input$Number, times = input$Repeats)
-      react$AllowEnsemble <- TRUE
-    } else if(any(input$Method %in% c("LGOCV","adaptive_LGOCV"))) {
-      index <- caret::createDataPartition(y, times = input$Number, p = 0.5, list = TRUE, groups = min(5, length(y)))
-      react$AllowEnsemble <- TRUE
-    } else {  #c("boot632", "optimism_boot", "boot_all", "LOOCV")
-      react$AllowEnsemble <- FALSE
-      index <- NULL
-      #stop(paste0("caretList does not currently know how to handle cross-validation method='", x$Method, "'. Please specify trControl$index manually"))
+    req(input$Target)
+    if ((input$ProbType == "Regression" || react$Prob2Class) && input$HypMetric %in% c("Accuracy", "Kappa","RMSE", "Rsquared", "MAE")) {
+      summFunc <- defaultSummary
+    } else if (input$HypMetric %in% c("ROC","Sens","Spec")) {
+      summFunc <- twoClassSummary
+    } else if (react$Prob2Class && input$HypMetric %in% c("AUC","Precision","Recall", "F")) {
+      summFunc <- prSummary
+    } else if (input$HypMetric %in% c("Accuracy","Kappa","Mean_F1", "Mean_Sensitivity",
+                                      "Mean_Specificity", "Mean_Pos_Pred_Value", "Mean_Neg_Pred_Value",
+                                      "Mean_Precision", "Mean_Recall", "Mean_Detection_Rate",
+                                      "Mean_Balanced_Accuracy","logLoss", "AUC", "prAUC")) {
+      summFunc <- multiClassSummary
+    } else {
+      req(FALSE)
     }
-
     trainControl(
       method = input$Method,
       number = input$Number,
       repeats = ifelse(grepl("[d_]cv$", input$Method), input$Repeats, NA),
-      verboseIter = Verbose,
-      index = index,
-#      sampling = ?????
-      preProcOptions = NULL, # Not allowed with Recipes
-#      timingSamps = 1000,  # this causes crashes relating to unknown variable names being supplied to predict()
       search = input$Search,
-      trim = TRUE,
-      allowParallel = TRUE,
+      verboseIter = TRUE,
+      returnData = TRUE,
+      returnResamp = "final",
+      savePredictions = TRUE,
       classProbs = input$ProbType == "Classification",
-      savePredictions = "final",
+      summaryFunction = summFunc,
       selectionFunction = input$SelectionFunc,
-      summaryFunction = ifelse(input$HypMetric %in% c("ROC","Sens","Spec"), twoClassSummary, defaultSummary)
+      preProcOptions = NULL, # Not allowed with Recipes
+      sampling = NULL,
+      index = getIndex(),
+      #   timingSamps = 1000,  # this causes crashes relating to unknown variable names being supplied to predict()
+      trim = FALSE,
+      allowParallel = input$Parallel
     )
-  })
-
-  ###########################################################################
-  getSelectedModelTypes <- reactive({
-    ml <- c()
-    if (is.null(input$ModelTable_rows_selected)) {
-      if (input$NullModel) {
-        ml <- c("null") # Add the null model
-      }
-    } else {
-      ml <- getFiltModels()[input$ModelTable_rows_selected, "Model"]
-      if (input$NullModel & length(ml) > 0) {
-        ml <- c("null", ml) # Add the null model
-      }
-    }
-    ml
   })
 
   ###########################################################################
@@ -1465,36 +3550,38 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
-  # Reset any trained models if the train-data, recipe and trControl specifications change
-  # This must not trigger due to changes in react$ModelSet
-  observeEvent(
+  # Reset any trained models if the train-data or reset button changes
+  observeEvent( #TODO review this
     {
       getTrainData()
-      getTrainControl()
       input$Reset
-      #react$Recipe()  might be better tp allow the preprocessing to vary - to see what works for certain methods
     },
     {
-      req(length(react$ModelSet) > 0)
+      methods <- getSelectedMethods()
+      req(length(methods) > 0)
       d <- getTrainData()
       req(nrow(d) > 0)
-      showNotification("Resetting trained models", duration = 10, session = session)
-      updateRadioButtons(session = session, inputId = "ResultsFor", choices = c(""), selected = "")
       modelSet <- react$ModelSet
+      req(length(modelSet) > 0)
+      showNotification("Resetting trained models", duration = 5, session = session)
+      updateRadioButtons(session = session, inputId = "ResultsFor", choices = list(""), selected = "")
       for (m in 1:length(modelSet)) {
-         modelSet[[m]] <- NULL
+        modelSet[[m]] <- NULL
       }
       react$ModelSet <- modelSet
-
-      # if(length(input$ModelTable_rows_selected) > 0) {
-      #   proxy <- dataTableProxy(outputId = "ModelTable", session = session)
-      #   selectRows(proxy, selected = NULL)
-      # }
     })
 
   ###########################################################################
+  observeEvent(input$UndoModel, {
+    req(length(react$ModelSet) > 0)
+    req(input$ResultsFor)
+    react$ModelSet[[input$ResultsFor]] <- NULL
+    showNotification(paste("Resetting model", input$ResultsFor), duration = 5, session = session)
+  })
+
+  ###########################################################################
   observe({
-    if(length(getSelectedModelTypes()) == 0) {
+    if (length(react$MethodSet) == 0) {
       shinyjs::disable(id = "Train")
     } else {
       shinyjs::enable(id = "Train")
@@ -1502,79 +3589,105 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
-  observe({
-    input$Train
-    req(isolate(input$Class))
-
-    isolate({
-      mTypes <- getSelectedModelTypes()
-    })
-
-    if (input$Weights != "") {
-      recipe <- react$Recipe %>%
-        update_role(input$Weights, new_role="case weight")
-    } else {
-      recipe <- react$Recipe 
-    }
-
-    req(length(mTypes) > 0)
-    count <- 0
-    done <- c()
-    assign("last.warning", NULL, envir = baseenv())
-    for (method in mTypes) {
-      if (!is.null(isolate(react$ModelSet[[method]]))) {  # note the dependency upon reactive react$ModelSet
-        count <- count + 1
-        done <- c(done, method)
-        next
+  observeEvent(
+    input$Train, 
+    {
+      req(input$Target)
+      methods <- getSelectedMethods()
+      req(length(methods) > 0)
+      recipe <- react$Recipe
+      TrainData <- getTrainData()
+      # remove any blank outcomes as the last operation in order to benefit from semi-supervised learning
+      recipe <- step_naomit(recipe, all_outcomes(), skip = TRUE)
+      
+      if (any(recipe$var_info$type == "date" & recipe$var_info$role == "predictor")) {
+        recipe <- step_rm(recipe, has_type("date"), -has_role("outcome"), -has_role("case weight"), -has_role("case id"), -has_role("presplit"), -has_role("group")) # remove any date variables (only their transforms should exist)
       }
-      if (isolate(input$Parallel)) {
-        startParallel()
-      }
-      shinyjs::disable(id = "Train")
-      prog <- (count+0.2) / length(mTypes)
-      withProgress({
-        isolate({
-          assign("last.warning", NULL, envir = baseenv())
-          setProgress( value = prog, message = paste("Training", method) )
-          warns <- utils::capture.output( {
-            output <- utils::capture.output( {
-              result <- tryCatch(
-                 caret::train(
-                    x = recipe,
-                  data = getTrainData(),
-                  method = method,
-                  metric = input$HypMetric,
-                  trControl = getTrainControl(),
-                  tuneLength = ifelse(input$Method == "none", 1, input$TuneLength),
-                  maximize = !(input$HypMetric %in% minimiseMetric)
-                ), error = function(e) {return(e)})
-            }, type = "output")
-          }, type = "message")
+      req(length(methods) > 0)
+      count <- 0
+      done <- c()
+      assign("last.warning", NULL, envir = baseenv())
+      for (method in methods) {
+        if (input$Pause) {
+          showNotification("Training was stopped early", duration = 10, session = session)
+          shinyBS::updateButton(session = session, inputId = "Pause", value = FALSE)
+          break
+        }
+        if (!is.null(isolate(react$ModelSet[[method]]))) {
+          count <- count + 1
+          done <- c(done, method)
+          next
+        }
+        shinyjs::disable(id = "Train")
+        prog <- (count + 0.2) / length(methods)
+        assign("last.warning", NULL, envir = baseenv())
+        parallelMode <- isolate(input$Parallel)
+        withProgress({
+          setProgress(value = prog, message = paste("Training method", method) )
+          obj <- NA
+          if (parallelMode) {
+            obj <- startParallel(method)
+            result <- tryCatch({
+              caret::train(x = recipe, data = TrainData, method = method, metric = input$HypMetric,
+                           trControl = getTrainControl(), tuneLength = ifelse(input$Method == "none", 1, input$TuneLength),
+                           maximize = !(input$HypMetric %in% minimiseMetric))
+            },
+            error = function(e) {
+              return(e)
+            })
+            react$Log[[method]] <- stopParallel(obj)
+            if (is(result, "error")) {
+              react$ModelSet[[method]] <- "Model failed to train"
+              react$Warn[[method]] <- c(result$message, warnings()) 
+            } else {
+              react$ModelSet[[method]] <- result
+              react$Warn[[method]] <- NULL
+            }
+          } else {
+            outputStream <- utils::capture.output( {
+              result <- tryCatch({
+                caret::train(x = recipe, data = TrainData, method = method, metric = input$HypMetric,
+                             trControl = getTrainControl(), tuneLength = ifelse(input$Method == "none", 1, input$TuneLength),
+                             maximize = !(input$HypMetric %in% minimiseMetric))
+              },
+              error = function(e) {
+                return(e)
+              })
+            }, type = "message")
+            if (is(result, "error")) {
+              react$ModelSet[[method]] <- "Model failed to train"
+              react$Log[[method]] <- ifelse(length(outputStream) == 0, "", outputStream)
+              react$Warn[[method]] <- c(result$message, warnings()) 
+            } else {
+              react$ModelSet[[method]] <- result
+              react$Log[[method]] <- outputStream
+              react$Warn[[method]] <- warnings()
+            }
+          }
         })
-      })
-      if(is(result, "error")) {
-        react$ModelSet[[method]] <- "Model failed to train"
-        react$Log[[method]] <- c(output, unique(warns), result$message) #, rlang::last_error())
-      } else {
-        react$ModelSet[[method]] <- result
-        react$Log[[method]] <- c(output, unique(warns))
-      }
-
-      if (isolate(input$Parallel)) {
-        stopParallel()
-      }
-      done <- c(done, method)
-      shinyjs::showElement(id = "ResultsFor")
-      updateRadioButtons(session = session, inputId = "ResultsFor", choices = done, selected = method)
-      invalidateLater(millis = 2000, session = session)
-      return()  # early exit if something was trained (sucessfully or otherwise)
-    } #end of for loop
-
-    updateRadioButtons(session = session, inputId = "ResultsFor", choices = done, selected = done[length(done)])
-    # to get here there must be no models to train in this pass
-    shinyjs::enable(id = "Train")
-    showNotification("Finished training", duration = 10, session = session)
-  }, priority = -10)
+        
+        done <- c(done, method)
+        shinyjs::showElement(id = "ResultsFor")
+        updateRadioButtons(session = session, inputId = "ResultsFor", choices = done, selected = method)
+        shinyjs::enable(id = "Train")
+        shinyjs::click(id = "Train")
+        return()  # early exit if something was trained (successfully or otherwise)
+      } #end of for loop
+      # to get here there must be no models to train in this pass
+      updateRadioButtons(session = session, inputId = "ResultsFor", choices = done, selected = done[length(done)])
+      shinyjs::enable(id = "Train")
+      showNotification("Finished training", duration = 10, session = session)
+    }, 
+    priority = -10, 
+    ignoreInit = TRUE, 
+    ignoreNULL = TRUE
+  )
+  
+  ###########################################################################
+  output$CurrentModel <- renderText({
+    req(input$ResultsFor)
+    input$ResultsFor
+  })
 
   ###########################################################################
   output$TrainLog <- renderText({
@@ -1583,29 +3696,74 @@ shinyServer(function(input, output, session) {
     req(mess)
     paste(collapse = "\n", mess)
   })
-
+  
+  ###########################################################################
+  output$TrainWarn <- renderText({
+    req(input$ResultsFor, react$Warn)
+    mess <- react$Warn[[input$ResultsFor]]
+    req(mess)
+    paste(collapse = "\n", mess)
+  })
+  
   ###########################################################################
   output$TrainModelRawPlot <- renderPlot({
     req(input$ResultsFor)
     mod <- react$ModelSet[[input$ResultsFor]]
-    req(mod, is(mod, "train"))
+    req(mod, is(mod, "train") | is(mod, "caretStack"))
     req(mod$method != "null")
     plot(mod$finalModel)
+  }, bg = "transparent")
+
+  ###########################################################################
+  getTrainedRecipe <- reactive({
+    req(input$ResultsFor)
+    mod <- react$ModelSet[[input$ResultsFor]]
+    req(mod, !inherits(mod, c("character")))
+    req(mod$method != "null")
+    mod$recipe
   })
+
+  ###########################################################################
+  output$TrainedRecipe <- renderPrint({
+    getTrainedRecipe()
+  })
+
+  ###########################################################################
+  output$RecipeSummary <- renderTable({
+    recip <- getTrainedRecipe()
+    req(recip)
+    as.data.frame(summary(recip))
+  })
+
+  # ###########################################################################
+  # output$Breakdown <- renderPlot({
+  #   req(input$ResultsFor)
+  #   mod <- react$ModelSet[[input$ResultsFor]]
+  #   req(mod, !inherits(mod, c("character")))
+  #   if (is(mod, "caretStack")) {
+  #     mod <- mod$ens_model
+  #   }
+  #   req(mod$method != "null")
+  #   testCase <- na.omit(getTestData())[1,]
+  #   explain <- breakDown::broken(mod, new_observation = testCase, data = getTrainData())
+  #   plot(explain) + ggtitle(paste("Breakdown plot for", react$ModelSet[[input$ResultsFor]]))
+  # })
 
   ###########################################################################
   output$VarImp <- renderPlot({
     req(input$ResultsFor)
     mod <- react$ModelSet[[input$ResultsFor]]
     req(mod, !inherits(mod, c("character")))
+    if (is(mod, "caretStack")) {
+      mod <- mod$ens_model
+    }
     req(mod$method != "null")
-
     trellis.par.set(caretTheme())
     # Not every model can produce a Variable-Importance plot so handle silently
     try({
-      plot(varImp(mod), main=paste(sep = " - ", "Variable Importance", input$ResultsFor))
+      plot(varImp(mod), main = paste(sep = " - ", "Variable Importance", input$ResultsFor))
     }, silent = TRUE)
-  })
+  }, bg = "transparent")
 
   ###########################################################################
   output$Optimize <- renderPlot({
@@ -1614,24 +3772,51 @@ shinyServer(function(input, output, session) {
     req(mod, !inherits(mod, c("character")))
     trellis.par.set(caretTheme())
     try({
-      plot(mod, main=paste(sep = " - ", "Hyper-parameter optimisation", input$ResultsFor))
+      plot(mod, main = paste(sep = " - ", "Hyper-parameter optimisation", input$ResultsFor))
     }, silent = TRUE)
-  })
+  }, bg = "transparent")
 
   ###########################################################################
   output$Hyperparams <- renderTable({
     req(input$ResultsFor)
     mod <- react$ModelSet[[input$ResultsFor]]
     req(is(mod, "train"))
-    mod$bestTune
+    xtable(mod$bestTune, caption = "Optimum hyper-parameters")
   })
+
+  ###########################################################################
+  output$Hyperparams2 <- renderTable({
+    req(input$SelectedModel )
+    mod <- react$ModelSet[[input$SelectedModel]]
+    req(is(mod, "train"))
+    xtable(mod$bestTune, caption = "Optimum hyper-parameters")
+  }, digits = 4)
+  
+  ###########################################################################
+  output$Characteristics <- renderTable({
+    req(input$ResultsFor, input$ResultsFor != "")
+    m <- getMethods()
+    req(!is(m, "character"))
+    if (grepl(pattern = "+", input$ResultsFor, fixed = TRUE)) {
+      xtable(data.frame(tags = "Ensemble model"), caption = "Method characteristics")
+    } else {
+      m <- getMethods()
+      Tags <- m[m$Model ==  input$ResultsFor, "Tags", drop = TRUE]
+      tags <- unlist(strsplit(x = Tags, split = "<br/>", fixed = TRUE))
+      xtable(data.frame(tags), caption = "Method characteristics")
+    }
+  })
+
   ###########################################################################
   output$ModelCoef <- renderPrint({
     req(input$ResultsFor)
     mod <- react$ModelSet[[input$ResultsFor]]
     req(mod, !inherits(mod, c("character")))
+    if (is(mod, "caretStack")) {
+      mod <- mod$ens_model
+    }
     beta <- try({
-       coef(mod$finalModel)
+        coef(mod$finalModel)
     }, silent = TRUE)
     req(class(beta) == "numeric")
     print(beta)
@@ -1646,247 +3831,266 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
-  output$Predictors <- renderPrint({
-    req(input$ResultsFor)
-    mod <- react$ModelSet[[input$ResultsFor]]
-    req(mod, !inherits(mod, c("character")))
-    pred <- predictors(mod$finalModel)
-    req(pred)
-    print(pred)
-  })
-
-  ###########################################################################
-  output$ModelSummary <- renderPrint({
-    req(input$ResultsFor)
-    mod <- react$ModelSet[[input$ResultsFor]]
-    req(mod, !inherits(mod, c("character")))
-    print(summary(mod$finalModel))
+  observe({
+    req(input$Target != "")
+    d <- getSomeData()
+    req(d)
+    req(input$Target %in% colnames(d))
+    if (input$ProbType == "Classification") {
+      Levfreq <- sort(table(d[, input$Target]), decreasing = FALSE)
+      updateSelectInput(session = session, inputId = "Positive", choices = as.list(names(Levfreq)), selected = as.list(names(Levfreq[1])))
+    }
   })
 
   ###########################################################################
   getConfusionMatrix <- reactive({
-    req(input$ProbType == "Classification", input$Class, input$ResultsFor)
+    req(input$ProbType == "Classification", input$Target, input$ResultsFor)
     mod <- react$ModelSet[[input$ResultsFor]]
-    req(mod, !inherits(mod, "character"))
-    caret::confusionMatrix(mod)
+    req(mod, !is(mod, "character"))
+    if (is(mod, "caretStack")) {
+      mod <- mod$ens_model
+    }
+    data <- getModelHoldOutResults(mod)
+    xtab <- table(data$obs, data$pred)
+    caret::confusionMatrix(xtab, positive = input$Positive, mode = "everything")
   })
 
   ###########################################################################
-  output$TrainedModelPlot <- renderPlot({
-    req(input$Class, input$ResultsFor)
+  output$ModelTrainPlot <- renderPlot({
+    req(input$Target, input$ResultsFor)
     mod <- react$ModelSet[[input$ResultsFor]]
-    req(!inherits(mod, "character"))
+    req(mod, !is(mod, "character"))
     if (input$ProbType == "Regression") {
-      train <- getTrainData()
-      isY <- colnames(train) == input$Class
-      predictions <- predict(mod, newdata = train[, !isY])
-      d <- data.frame(predictions, train[,isY])
-      colnames(d) <- c("pred", "obs")
-      par(pty = "s")
-      range <- range(c(d$obs, d$pred), na.rm = TRUE)
-      plot(d, xlim = range, ylim = range,  main = "Predicted versus Observed for training data")
-      abline(a = 0, b = 1, col = "blue", lty = 2)
-    } else {
+      if (is(mod, "caretStack")) {
+        mod <- mod$ens_model
+      }
+      d <- getModelHoldOutResults(mod)
+      rang <- range(c(d$obs, d$pred))
+      plot <- ggplot(data = d) +
+        geom_point(mapping = aes(x = pred, y = obs)) +
+        geom_abline(slope = 1, col = "blue") +
+        labs(title = "Resampled results", y = "actual", x = "predicted") +
+        coord_fixed(ratio = 1, xlim = rang, ylim = rang, expand = TRUE)
+    } else if (input$ProbType == "Classification") {
       cm <- getConfusionMatrix()$table
-      cmdf <- melt(data = cm)
-      colnames(cmdf) <- c("Prediction", "Observation", "value")
-      cmdf$value <- cmdf$value / sum(cmdf$value)
-      alluvial::alluvial(
-        cmdf[,1:2],
-        freq = cmdf$value,
-        col = ifelse(cmdf[, 1] == cmdf[, 2], "green", "red"),
-        alpha = 0.5,
-        hide  = cmdf$value == 0
-      )
-      mtext("Resampled confusion matrix", 3, line=3, font=2)
+      data <- as.data.frame(cm)
+      colnames(data) <- c("Prediction","Reference", "Freq")
+      data$missclassified <- data$Prediction != data$Reference
+      plot <- ggplot(data = data, mapping = aes(y = Freq, axis1 = Prediction, axis2 = Reference, label = after_stat(stratum))) +
+        ggalluvial::geom_alluvium(aes(fill = missclassified, colour = missclassified), show.legend = TRUE) +
+        ggalluvial::geom_stratum(width = 0.2) +
+        geom_text(stat = "stratum", reverse = TRUE) +
+        scale_x_discrete(limits = c("Prediction", "Actual"), expand = c(0.0, 0.0)) +
+        ggtitle("Resampled confusion matrix") +
+        scale_fill_manual(values = c("green","red")) +
+        theme(plot.background = element_blank(), 
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank(),
+              axis.ticks.x = element_blank(),
+              legend.position = "bottom")
     }
-  })
+    #plotly(plot) #GGalluvial is not plotly ready
+    plot
+  }, bg = "transparent")
 
   ###########################################################################
-  output$TrainPlot <- renderPlot({
-    req(input$Class, input$ResultsFor)
+  output$RocCurvePlot <- renderPlot({
+    ds <- getDataSummary()
+    req(input$ResultsFor, input$Target != "")
+    shinyjs::toggle(id = "ROCPlot", condition = input$ProbType == "Classification" & any(rownames(ds)[ds$uniqueness == 2] == input$Target))
+    req(input$ProbType == "Classification" & any(rownames(ds)[ds$uniqueness == 2] == input$Target))
     mod <- react$ModelSet[[input$ResultsFor]]
-    req(!inherits(mod, "character"))
-    model <- mod$finalModel
-    if(any(class(model) %in% c("nullModel","fbrs","gausspr"))) {
-      NULL
-    } else if(any(class(model) %in% c("rpart"))) {
-        rpart.plot(model, box.palette="RdBu", shadow.col="gray", nn=TRUE)
-    } else if(any(class(model) %in% c("lm","glm","enet")) & input$ProbType == "Regression") {
-      par(mfrow = c(2, 2),
-          oma = c(0, 0, 2, 0))
-      plot(model)
-    } else if(any(class(model) %in% c("glm") & input$ProbType == "Classification")) {
-      NULL
-    } else if(any(class(model) %in% c("blassoAveraged", "RRF", "regsubsets", "gam"))) {
-      plot(model)
-    } else {  # give it a try
-      plot(model, main=class(model))
+    req(mod)
+    req(!is(mod, "character"))
+    if (is(mod, "caretStack")) {
+      mod <- mod$ens_model
     }
-})
+    data <- getModelHoldOutResults(mod)
+    req(input$Positive %in% colnames(data))
+    req(nlevels(data$obs) == 2)
+    data$M <- data[, input$Positive]
+    data$D <- as.numeric(data$obs == input$Positive)
+    g <- ggplot(data, aes(m = M, d = D)) +
+      geom_roc(n.cuts = 0) + #not plotly compatible yet
+      geom_rocci() + # not plotly compatible yet
+      coord_equal() + 
+      style_roc() +
+      labs(title = "Receiver Operating Characteristic (ROC) Curve") +
+      theme(plot.background = element_blank())
+    try({
+      g <- g + annotate("text", x = 0.75, y = 0.25, label = paste("AuC =", round((calc_auc(g))$AUC, 2)))
+    }, silent = TRUE)
+    g 
+  }, bg = "transparent")
 
   ###########################################################################
-  output$FinalModelCM <- renderPrint({
+  output$ClassStats <- renderPrint({
+    req(input$ProbType == "Classification")
     print(getConfusionMatrix())
   })
 
   ###########################################################################
-  getTrainedModels <- reactive({
-    req(length(react$ModelSet) > 1)
-    bad <- unlist(lapply(react$ModelSet, FUN = inherits, what = c("character")))
-    req(sum(!bad) > 1)
-    models <- react$ModelSet[!bad]
-    for(m in 1:length(models)) {
-      if (is(models[[m]], "caretStack")) {
-        models[[m]] <- models[[m]]$ens_model
-      }
+  output$Resamples <- renderTable({
+    req(length(react$ModelSet) > 0, input$Target, input$ResultsFor)
+    mod <- react$ModelSet[[input$ResultsFor]]
+    req(mod, !inherits(mod, "character"))
+    if (is(mod, "caretStack")) {
+      mod <- mod$ens_model
     }
-    models
-  })
+    results <- dplyr::inner_join(mod$results, mod$bestTune, by = colnames(mod$bestTune))
+    results <- results[, colnames(mod$results) %in% mod$perfNames]
+    good <- !apply(results, MARGIN = 2, FUN = is.na)
+    results2 <- results[, good, drop = FALSE]
+    miss <- sum(is.na(mod$pred$pred))
+    if (miss > 0) {
+      results2$`Missing Pred(%)` <- miss / length(mod$pred$pred) * 100
+    }
+    tryCatch({
+      results2$`Train Obs` <- length(fitted(mod))
+    }, error = function(e) {
+      results2$`Train Obs` <- length(fitted(mod$finalModel))
+    })
+    req(ncol(results2) > 0)
+    results2
+  }, digits = 2, width = "100%")
 
   ###########################################################################
-  getTimings <- reactive({
-    d <- getTrainData()
-    thousand <- sample(nrow(d), size = 1000, replace = TRUE)
-    d <- d[thousand, !colnames(d) == input$Class]
-    timing <- c()
-    for (mod in getTrainedModels()) {
-      t <- system.time(
-        predict(mod,  newdata = d, type = "raw")
-      )
-      timing <- c(timing, t[1])
+  output$Resamples2 <- renderTable({
+    req(length(react$ModelSet) > 0, input$Target, input$SelectedModel)
+    mod <- react$ModelSet[[input$SelectedModel]]
+    req(mod, !inherits(mod, "character"))
+    if (is(mod, "caretStack")) {
+      mod <- mod$ens_model
     }
-    timing
-  })
-
-  ###########################################################################
-  getResampledModels <- reactive({
-    res <- try({
-      resamples(getTrainedModels())
-    }, silent = FALSE)
-    req(is(res, "resamples"))
-
-    #Add timings to the metrics
-    timings <- getTimings()
-    df <- res$values
-    origNames <- colnames(df)
-    res$metrics[length(res$metrics)+1] <- "logTiming"
-    for (m in 1:length(res$models)) {
-       timing <- rep(log10(timings[m]), times = nrow(df))
-       df <- cbind(df, timing)
+    results <- dplyr::inner_join(mod$results, mod$bestTune, by = colnames(mod$bestTune))
+    results <- results[, colnames(mod$results) %in% mod$perfNames]
+    good <- !apply(results, MARGIN = 2, FUN = is.na)
+    results2 <- results[, good, drop = FALSE]
+    miss <- sum(is.na(mod$pred$pred))
+    if (miss > 0) {
+      results2$`Missing Pred(%)` <- miss / length(mod$pred$pred) * 100
     }
-    colnames(df) <- c(origNames, paste(sep="~", res$models, "logTiming"))
-    res$values <- df
-    res
-  })
-
-  ###########################################################################
-  observe({
-    mods <- getResampledModels()
-    shinyjs::toggle(id = "NullNormalise", condition = length(mods$models) > 1 & input$NullModel)
-    shinyjs::toggle(id = "SelectedModelCM", condition = input$ProbType == "Classification")
-    shinyjs::toggle(id = "FinalModelCM", condition = input$ProbType == "Classification")
-    shinyjs::toggle(id = "ExcludeNull", condition = input$NullModel)
-  })
-
+    tryCatch({
+      results2$`Train Obs` <- length(fitted(mod))
+    }, error = function(e) {
+      results2$`Train Obs` <- length(fitted(mod$finalModel))
+    })
+    req(ncol(results2) > 0)
+    results2
+  }, digits = 2, width = "100%")
+  
   ###########################################################################
   output$Selection <- renderPlot({
     mods <- getResampledModels()
-    if(!input$NullModel & "null" %in% mods$models) {
-      mods$models[mods$models == "null"] <- NULL
+    if (length(mods$metrics) == 0) {
+      alert("No metrics available to plot")
+      req(FALSE)
+    }
+    if (!input$NullModel && any(mods$models == "null")) {
+      mods$models <- mods$models[mods$models != "null"]
       nullCols <- grepl(pattern = "^null~", x = colnames(mods$values))
-      mods$values[, nullCols] <- NULL
+      mods$values <- mods$values[, !nullCols]
     }
     req(length(mods$models) > 0)
-
-    #scale metrics using null model
-    if(input$NullNormalise & "null" %in% mods$models) {
+    if (input$NullNormalise & "null" %in% mods$models) {
       actualNames <- colnames(mods$values)
-
-      # Normalise the various hyper-metrics
-      for (metric in c(regChoices, clasChoices, biClasChoices)) {
-        col <- paste(sep="~", "null", metric)
+      # Normalise the various hyper-metrics using null model
+      for (metric in unique(c(regChoices, multiClassChoices, biClassChoices))) {
+        col <- paste(sep = "~", "null", metric)
         if (col %in% actualNames) {
           nullMetric <- mean(mods$values[, col], na.rm = TRUE)
-          if(!is.na(nullMetric) & nullMetric != 0) {
+          if (!is.na(nullMetric) & nullMetric != 0) {
             for (model in mods$models) {
-              mcol <- paste(sep="~", model, metric)
-              if(mcol %in% actualNames) {
+              mcol <- paste(sep = "~", model, metric)
+              if (mcol %in% actualNames) {
                 mods$values[, mcol] <- mods$values[, mcol] / nullMetric
               }
             }
           }
         }
       }
-
-      # Normalise the prediction timings per 1000
-      nullMetric <- mean(mods$values[, "null~logTiming"], na.rm = TRUE)
-      for (model in mods$models) {
-         mcol <- paste(sep="~", model, "logTiming")
-         if(mcol %in% actualNames) {
-            mods$values[, mcol] <- mods$values[, mcol] - nullMetric
-         }
+      if (!input$HideTimings) {
+        # Normalise the prediction timings per 1000
+        nullMetric <- mean(mods$values[, "null~logTiming"], na.rm = TRUE)
+        for (model in mods$models) {
+          mcol <- paste(sep = "~", model, "logTiming")
+          if (mcol %in% actualNames) {
+            mcol <- paste(sep = "~", model, metric)
+            if (mcol %in% actualNames) {
+              mods$values[, mcol] <- mods$values[, mcol] / nullMetric
+            }
+          }
+        }
       }
+    }
+
+    #hide results worse than null model
+    subset <- rep(TRUE, length(mods$models))
+    if (input$HideWorse & "null" %in% mods$models) {
+       actualNames <- colnames(mods$values)
+       col <- paste(sep = "~", "null", input$HypMetric)
+       if (col %in% actualNames) {
+         nullMetric <- mean(mods$values[, col], na.rm = TRUE)
+         if (!is.na(nullMetric)) {
+           m <- 0
+           for (model in mods$models) {
+             m <- m + 1
+             mcol <- paste(sep = "~", model, input$HypMetric)
+             if (mcol %in% actualNames) {
+               subset[m] <- ifelse(input$HypMetric %in% minimiseMetric, mean(mods$values[, mcol], na.rm = TRUE) <= nullMetric, mean(mods$values[, mcol], na.rm = TRUE) >= nullMetric)
+             }
+           }
+         }
+       }
+    }
+
+    if (input$ExcludeNull) {
+      subset <- subset & mods$models != "null"
     }
 
     # plot metrics
+    req(any(subset))
     trellis.par.set(caretTheme())
-    bwplot(mods)
-  })
+    bwplot(mods, models = mods$models[subset], notch = input$ShowNotches)   #metric = "RMSE", main =""
+  }, bg = "transparent")
 
   ###########################################################################
-  # Maybe I should use the residuals in the resampled objects
   output$ResidualCorr <- renderPlot({
-    rModels <- getResampledModels()
-    mods <- c(rModels$models)  #make a copy
-
-    # drop the null model as it is not a true model for correlation purposes
-    if (input$ExcludeNull) {
-      mods <- mods[-which(mods == "null")]
-    }
-
-    #remove any emsembles (i.e. no Recipe classes)
-    recips <- vector(mode = "logical", length = length(mods))
-    for (i in 1:length(mods)) {
-      recips[i] <- is(react$ModelSet[[mods[i]]], "train.recipe")
-    }
-    mods <- mods[recips]
-
-    req(length(mods) > 1)
-
-    modelSet <- react$ModelSet[mods]
-    d <- getTrainData()
-    y <- d[,input$Class]
-    r <- matrix(NA, nrow = nrow(d), ncol = length(mods))
-    yhat <- as.data.frame(predict(modelSet, newdata = d))
-    if (any(class(y) == "numeric")) {
-      for (m in 1:ncol(yhat)) {
-        r[,m] <- y - yhat[,m]
-      }
-    } else {
-      for (m in 1:ncol(yhat)) {
-        r[,m] <- ifelse(y == yhat[,m], 0, 1)
+    rmodels <- getResampledModels()
+    # remove any ensembles (i.e. not Recipe classes) or null model
+    for (name in rmodels$models) {
+      if (is(react$ModelSet[[name]], "caretStack") | (name == "null" & input$ExcludeNull)) {
+        rmodels$models <- rmodels$models[rmodels$models != name]
+        rmodels$values <- rmodels$values[, !grepl(pattern = paste0("^", name, "~"), x = colnames(rmodels$values))]
       }
     }
-    colnames(r) <- mods
-    corrplot::corrplot(corr = cor(r), method = "circle", type = "upper", title = "Residual Correlation", diag = TRUE, mar = c(10,4.5,4.5,3) )
-  })
+
+    req(length(rmodels$models) > 1)
+    modelSet <- react$ModelSet[rmodels$models]
+    cormat <- caret::modelCor(resamples(modelSet))
+    try({
+      corrplot::corrplot(corr = cormat, method = "circle", type = "full", title = "Model Correlation", order = "hclust", diag = TRUE, mar = c(10,4.5,4.5,3) )
+    }, silent = TRUE)
+  }, bg = "transparent")
 
   ###########################################################################
-  output$Cluster <- renderPlot({
-    models <- getResampledModels()
-    # hide null model from dendrogram
-    if (FALSE) {
-      models$models <- models$models[models$models != "null"]
-      cols <- grepl(pattern = "^null~", x = colnames(models$values))
-      models$values <- models$values[, !cols]
+  output$ModelTree <- renderPlot({
+    rmodels <- getResampledModels()
+    # remove any ensembles (i.e. not Recipe classes) or null model
+    for (name in rmodels$models) {
+      if (is(react$ModelSet[[name]], "caretStack") | (name == "null" & input$ExcludeNull)) {
+        rmodels$models <- rmodels$models[rmodels$models != name]
+        rmodels$values <- rmodels$values[, !grepl(pattern = paste0("^", name, "~"), x = colnames(rmodels$values))]
+      }
     }
-    req(length(models$models) > 2)
-    plot(caret::cluster(models), sub= "")
-  })
+    req(length(rmodels$models) > 2)
+    plot(caret::cluster(rmodels), sub = "")
+  }, bg = "transparent")
 
   ###########################################################################
   observe({
+    input$Reset
     req(input$HypMetric)
     if (length(react$ModelSet) == 0) {
       shinyjs::hideElement(id = "SelectedModel")
@@ -1903,26 +4107,32 @@ shinyServer(function(input, output, session) {
       means <- apply(models$values[, cols, drop = FALSE], MARGIN = 2, FUN = mean, na.rm = TRUE)
       mNames[order(means, decreasing = !(input$HypMetric %in% minimiseMetric))]
     }, silent = TRUE)
-    updateRadioButtons(session = session, inputId = "SelectedModel", choices = mNames, selected = mNames[[1]])
+    updateRadioButtons(session = session, inputId = "SelectedModel", choices = as.list(mNames), selected = mNames[[1]])
     shinyjs::toggle(id = "SelectedModel", condition = mNames[[1]] != "")
   })
 
   ###########################################################################
-  isValid2 <- function(x) {
-    !is.null(x) && is(x, "train") && is.function(x$modelInfo$prob)
+  isTrainValid <- function(x) {
+    !is.null(x) && (is(x, "train") || is(x, "caretStack")) && is.function(x$modelInfo$prob)
   }
 
   ###########################################################################
   observe({
-    if (length(react$ModelSet) > 0) {
-      ok <- sapply(react$ModelSet, isValid2)
+    if (length(react$ModelSet) == 0) {
+      shinyjs::hideElement(id = "Ensemble")
+      updateSelectizeInput(session = session, inputId = "Ensemble", choices = list(""), selected = "")
+    } else if (input$ProbType == "Classification") {
+      ok <- sapply(react$ModelSet, isTrainValid)
       mNames <- names(react$ModelSet)[ok] # Should not be able to select models that have no class probs
       mNames <- mNames[mNames != "null"]
       shinyjs::toggleElement(id = "Ensemble", condition = length(mNames) > 1 & react$AllowEnsemble)
-      updateSelectizeInput(session = session, inputId = "Ensemble", choices = mNames, selected = "")
+      updateSelectizeInput(session = session, inputId = "Ensemble", choices = as.list(mNames), selected = "")
     } else {
-      shinyjs::hideElement(id = "Ensemble")
-      updateSelectizeInput(session = session, inputId = "Ensemble", choices = c(""), selected = "")
+      mNames <- names(react$ModelSet)
+      mNames <- mNames[mNames != "null"]
+      mNames <- mNames[!grepl(pattern = "\\+",x = mNames)]
+      shinyjs::toggleElement(id = "Ensemble", condition = length(mNames) > 1 & react$AllowEnsemble)
+      updateSelectizeInput(session = session, inputId = "Ensemble", choices = as.list(mNames), selected = "")
     }
   })
 
@@ -1935,70 +4145,64 @@ shinyServer(function(input, output, session) {
   observeEvent(input$AddModel, {
     req(length(input$Ensemble) > 1)
     shinyjs::disable(id = "Train")
-    prog <- (length(react$ModelSet)+0.2) / (length(react$ModelSet)+1)
+    prog <- (length(react$ModelSet) + 0.2) / (length(react$ModelSet) + 1)
     method <- paste(collapse = "+", input$Ensemble)
-    ensembModels <- react$ModelSet[input$Ensemble]
-    class(ensembModels) <- "caretList" #Note we are faking this to be a caretList class
+    ensembModels <- as.caretList(react$ModelSet[input$Ensemble])
+    updateTabItems(session = session, inputId = "Navbar", selected = "Train")
+    assign("last.warning", NULL, envir = baseenv())
+    showNotification(id = method, ui = paste("Training ensemble", method), duration = NULL)
+    warns <- utils::capture.output( {
+      output <- utils::capture.output( {
+        result <- tryCatch({
+          ensControl <- getTrainControl()
+          ensControl$index <- NULL  ## documented as necessary. See https://cran.r-project.org/web/packages/caretEnsemble/vignettes/caretEnsemble-intro.html
+          caretEnsemble::caretStack(all.models = ensembModels, method = "glm", trControl = ensControl, metric = input$HypMetric, tuneLength = input$TuneLength)
+        }, error = function(e) {return(e)})
+      }, type = "output")
+    }, type = "message")
 
-    withProgress({
-      assign("last.warning", NULL, envir = baseenv())
-      setProgress( value = prog, message = paste("Training", method) )
-      warns <- utils::capture.output( {
-        output <- utils::capture.output( {
-          result <- tryCatch({
-            trControl = getTrainControl()
-            trControl$index <- NULL
-            caretStack(all.models = ensembModels, method = "glm", trControl = trControl, metric = input$HypMetric, tuneLength = input$TuneLength)
-          }, error = function(e) {return(e)})
-        }, type = "output")
-      }, type = "message")
-    })
-    if(is(result, "error")) {
+    if (is(result, "error")) {
       react$ModelSet[[method]] <- "Model failed to train"
       react$Log[[method]] <- c(output, unique(warns), result$message) #, rlang::last_error())
     } else {
       react$ModelSet[[method]] <- result
       react$Log[[method]] <- c(output, unique(warns))
     }
-    updateRadioButtons(session = session, inputId = "ResultsFor", choices = names(react$ModelSet), selected = method)
-    updateNavbarPage(session = session, inputId = "Navbar", selected = "Training")
+    updateRadioButtons(session = session, inputId = "ResultsFor", choices = as.list(names(react$ModelSet)), selected = method)
+    removeNotification(id = method)
+    showNotification(ui = "Finished training")
     shinyjs::enable(id = "Train")
   })
 
-  ###########################################################################
-  observeEvent(input$Next, {
-    if (input$Navbar == "Data") {
-      updateNavbarPage(session = session, inputId = "Navbar", selected = "Split")
-    } else if (input$Navbar == "Split") {
-      updateNavbarPage(session = session, inputId = "Navbar", selected = "Preproc")
-    } else if (input$Navbar == "Preproc") {
-     updateNavbarPage(session = session, inputId = "Navbar", selected = "Model Types")
-    } else if (input$Navbar == "Model Types") {
-      updateNavbarPage(session = session, inputId = "Navbar", selected = "Training")
-    } else if (input$Navbar == "Training") {
-      updateNavbarPage(session = session, inputId = "Navbar", selected = "Selection")
-    } else if (input$Navbar == "Selection") {
-      updateNavbarPage(session = session, inputId = "Navbar", selected = "Performance")
-    }
-  })
+  # ###########################################################################
+  # getExplanation <- reactive({
+  #   req(input$Target, input$SelectedModel)
+  #   mod <- react$ModelSet[[input$SelectedModel]]
+  #   req(!inherits(mod, "character"))
+  #   data <- getTestData()
+  #   isY <- colnames(data) == input$Target
+  #   DALEX::explain(model = mod, data = data[, !isY], y = data[,isY])
+  # })
 
+  ##########################################################################
+  getGraduatingModel <- reactive({
+    mod <- react$ModelSet[[input$SelectedModel]]
+    req(mod, !inherits(mod, "character"))
+    mod
+  }) 
   ###########################################################################
-  observe({
-    if (input$Navbar == "Performance") {
-      shinyjs::hideElement(id = "Next")
-    } else {
-      shinyjs::showElement(id = "Next")
-    }
+  output$GradLabel <- renderText({
+    paste("Method:", getGraduatingModel()$modelInfo$label)
   })
-
+  
   ###########################################################################
   getTestConfusionMatrix <- reactive({
     req(input$ProbType == "Classification")
-    req(input$Class, input$SelectedModel)
+    req(input$Target, input$SelectedModel)
     mod <- react$ModelSet[[input$SelectedModel]]
     req(!inherits(mod, "character"))
     data <- getTestData()
-    isY <- colnames(data) == input$Class
+    isY <- colnames(data) == input$Target
     caret::confusionMatrix(
       data = predict(mod, newdata = data[, !isY]),
       reference = data[,isY],
@@ -2008,16 +4212,186 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
-  output$SelectedModelPlot <- renderPlot({
-    req(input$SelectedModel)
-    mod <- react$ModelSet[[input$SelectedModel]]
-    req(!inherits(mod, "character"))
+  getFinalIndex <- reactive({
+    # In this snippet of code the holdouts sets remain what they were.
+    # The new train sets are a combination of the original train data union-ed 
+    # with the "test" data.
+    # This makes a comparison to the previous hold-out results fair.
+    req(input$Method, input$ProbType, input$Target)
+    tindex <- (1:ncol(getData()))[-getPartition()]
+    indexes <- getTrainControl()$index
+    # Add these train indices to the test indices
+    for (l in names(index)) {
+      indexes[[l]] <- c( indexes[[l]], tindex)
+    }
+    indexes
+  })
+
+  ###########################################################################
+  getFinalRecipe <- reactive({
+    if (input$LockRecipe) {
+      data <- getFinalData()
+      recipe <- recipes::recipe(as.formula(paste0(input$Target, " ~ .")), data = data)
+      if (input$Weights %in% colnames(data)) {
+        w <- input$Weights
+        recipe <- update_role(recipe, one_of(w), new_role = "case weight")
+      }
+      if (!is.null(input$ID) && all(input$ID %in% colnames(data))) {
+        w <- input$ID
+        recipe <- update_role(recipe, one_of(w), new_role = "case id")
+      }
+      if (length(react$HighCardinality) > 0) {
+        hc <- react$HighCardinality
+        recipe <- recipes::add_role(recipe, !!!hc, new_role = "high cardinality")
+      }
+      if (input$PreSplit %in% colnames(data)) {
+        vars <- input$PreSplit
+        recipe <- update_role(recipe, one_of(vars), new_role = "presplit")
+      }
+      if (all(input$Groups %in% colnames(data))) {
+        vars <- input$Groups
+        recipe <- add_role(recipe, one_of(vars), new_role = "group")
+        recipe <- remove_role(recipe, one_of(vars), old_role = "predictor")
+      }
+      if (!is.null(input$HideCol) && all(input$HideCol %in% colnames(data))) {
+        w <- input$HideCol
+        recipe <- step_rm(recipe, one_of(w))
+      }
+      recipe
+    } else {
+      react$Recipe
+    }
+  })  
+
+  ###########################################################################
+  getFinalData <- reactive({
+    if (input$LockRecipe) {
+      mod <- getGraduatingModel()
+      tryCatch({
+        rec <- recipes::prep(mod$recipe, training = getTrainData(), verbose = Verbose, retain = TRUE, strings_as_factors = FALSE) #Use the training data %>% 
+        fdata <- recipes::bake(rec, everything(), new_data = getData(), composition = "data.frame")
+      }, error = function(e) {
+        print(e)
+        req(FALSE)
+      })
+      # # converts >= 15 unique levels to character
+      # charCols <- which(allClass(fdata) == "factor")
+      # max <- nrow(fdata)
+      # for (col in charCols) {
+      #   if (length(unique(fdata[,col])) >  getContinuousDebounced()[1]) {
+      #     fdata[,col] <- as.character(fdata[,col])
+      #   }
+      # }
+    } else {
+      fdata <- getData()  
+    }
+    fdata
+  })
+  
+  ###########################################################################
+  observeEvent(
+    input$LockModel,
+    {
+      if (input$LockModel) {
+        shinyjs::disable(id = "LockHyper") 
+        shinyjs::disable(id = "LockRecipe") 
+        shinyjs::disable(id = "GradTrain") 
+      } else {
+        shinyjs::enable(id = "LockHyper") 
+        shinyjs::enable(id = "LockRecipe") 
+        shinyjs::enable(id = "GradTrain") 
+      }
+    }
+  )
+  
+  
+  ###########################################################################
+  getTrainedFinalisedModel <- reactive({
+    if (input$LockModel) {
+      getGraduatingModel()
+    } else {
+      gradTrainedModel()  
+    }
+  })
+    
+  ###########################################################################
+  gradTrainedModel <- eventReactive(
+    input$GradTrain,
+    {
+      mod <- getGraduatingModel()
+      method <- mod$method
+      showNotification(session = session, paste("Final training method:", method), duration = NULL, id = "Final")
+      shinyjs::disable((id = "GradTrain"))
+      trcontrol <- getTrainControl()
+      trcontrol$index <- getFinalIndex()
+      if (input$LockHyper) {
+        grid <- mod$bestTune
+        tuneLength <- 1
+        trcontrol$search <- "grid"
+      } else {
+        grid <- NULL
+        tuneLength <- isolate(input$TuneLength)
+        trcontrol$search <- isolate(input$Search)
+      }
+      assign("last.warning", NULL, envir = baseenv())
+      parallelMode <- isolate(input$Parallel)
+      obj <- NA
+      output <- NULL
+      fdata <- getFinalData()
+      frecipe <- getFinalRecipe()
+      if (parallelMode) {
+        obj <- startParallel(method)
+        result <- tryCatch({
+          caret::train(x = frecipe, data = fdata, method = method, trControl = trcontrol,
+                       metric = input$HypMetric, tuneGrid = grid, tuneLength = tuneLength)
+        },
+        error = function(e) {
+          e
+        })
+        output <- stopParallel(obj)
+      } else {
+        output <- utils::capture.output( {
+          result <- tryCatch({   
+            caret::train(x = frecipe, data = fdata, method = method, trControl = trcontrol,
+                         metric = input$HypMetric, tuneGrid = grid, tuneLength = tuneLength)
+          },
+          error = function(e) {
+            e
+          })
+        }, type = "message")
+      }
+      
+      if (is(result, "error")) {
+        print(result$message)
+        print(output)
+      }
+      
+      if (input$LockRecipe) {
+        gmod <- getGraduatingModel()
+        gmod$results <- result$results
+        gmod$bestTune <- result$bestTune
+        gmod$resample <- result$resample
+        gmod$finalModel <- result$finalModel
+        result <- gmod
+      }
+      shinyjs::enable((id = "GradTrain"))
+      removeNotification(session = session, id = "Final")
+      result
+    },
+    ignoreInit = TRUE
+  )
+  
+  ###########################################################################
+  output$GradModelPlot1 <- renderPlot({
+    mod <- getGraduatingModel()
+    req(mod)
+    req(!inherits(mod, "error"))
     if (input$ProbType == "Classification") {
       cm <- getTestConfusionMatrix()$table
-      # alternative to below: mosaicplot(cm)
       cmdf <- melt(data = cm)
       colnames(cmdf) <- c("Prediction", "Observation", "value")
       cmdf$value <- cmdf$value / sum(cmdf$value)
+      par(pty = "s")
       alluvial::alluvial(
         cmdf[,1:2],
         freq = cmdf$value,
@@ -2025,38 +4399,191 @@ shinyServer(function(input, output, session) {
         alpha = 0.5,
         hide  = cmdf$value == 0
       )
-      mtext("Resampled confusion matrix", 3, line=3, font=2)
+      mtext("Confusion matrix for test data", 3, line = 3, font = 2)
     } else if (input$ProbType == "Regression") {
       req(input$ProbType == "Regression")
       test <- getTestData()
-      isY <- colnames(test) == input$Class
+      isY <- colnames(test) == input$Target
       predictions <- predict(mod, newdata = test[, !isY])
       d <- data.frame(predictions, test[, isY])
       colnames(d) <- c("pred", "obs")
-      par(pty = "s")
-      range <- range(c(d$obs, d$pred), na.rm = TRUE)
-      plot(d, xlim = range, ylim = range, main = "Predicted versus Observed for test data")
-      abline(a = 0, b = 1, col = "blue", lty = 2)
+      range <- range(c(d$pred, d$obs), na.rm = TRUE)
+      ggplot2::ggplot(data = d) +
+        geom_point(mapping = aes(x = pred, y = obs)) +
+        geom_abline(slope = 1, intercept = 0, colour = "blue") +
+        labs(title = "Test results",  y = "Observed", x = "Predicted") +
+        coord_fixed(ratio = 1, xlim = range, ylim = range, expand = TRUE)
     }
-  })
+  }, bg = "transparent")
+  
+  ###########################################################################
+  output$GradModelPlot2 <- renderPlot({
+    mod <- getTrainedFinalisedModel()
+    req(mod)
+    req(!inherits(mod, "error"))
+    if (input$ProbType == "Classification") {
+      cm <- getTestConfusionMatrix()$table
+      cmdf <- melt(data = cm)
+      colnames(cmdf) <- c("Prediction", "Observation", "value")
+      cmdf$value <- cmdf$value / sum(cmdf$value)
+      par(pty = "s")
+      alluvial::alluvial(
+        cmdf[,1:2],
+        freq = cmdf$value,
+        col = ifelse(cmdf[, 1] == cmdf[, 2], "green", "red"),
+        alpha = 0.5,
+        hide  = cmdf$value == 0
+      )
+      mtext("Confusion matrix for test data", 3, line = 3, font = 2)
+    } else if (input$ProbType == "Regression") {
+      req(input$ProbType == "Regression")
+      test <- getTestData()
+      isY <- colnames(test) == input$Target
+      predictions <- predict(mod, newdata = test[, !isY])
+      d <- data.frame(predictions, test[, isY])
+      colnames(d) <- c("pred", "obs")
+      range <- range(c(d$pred, d$obs), na.rm = TRUE)
+      ggplot2::ggplot(data = d) +
+        geom_point(mapping = aes(x = pred, y = obs)) +
+        geom_abline(slope = 1, intercept = 0, colour = "blue") +
+        labs(title = "Predicted versus Observed for test data",  y = "Observed", x = "Predicted") +
+        coord_fixed(ratio = 1, xlim = range, ylim = range, expand = TRUE)
+    }
+  }, bg = "transparent")
+  
+  ###########################################################################
+  output$FinalResamples <- renderTable({
+    mod <- getTrainedFinalisedModel()
+    req(mod, !inherits(mod, "error"))
+    if (is(mod, "caretStack")) {
+      mod <- mod$ens_model
+    }
+    req(mod$results)
+    results <- dplyr::inner_join(x = mod$results, y = mod$bestTune, by = colnames(mod$bestTune))
+    results <- results[, colnames(mod$results) %in% mod$perfNames]
+    good <- !apply(results, MARGIN = 2, FUN = is.na)
+    results2 <- results[, good, drop = FALSE]
+    miss <- sum(is.na(mod$pred$pred))
+    if (miss > 0) {
+      results2$`Missing Pred(%)` <- miss / length(mod$pred$pred) * 100
+    }
+    tryCatch({
+      results2$`Train Obs` <- length(fitted(mod))
+    }, error = function(e) {
+      results2$`Train Obs` <- length(fitted(mod$finalModel))
+    })
+    req(ncol(results2) > 0)
+    results2
+  }, digits = 2, width = "100%")
+  
+  ###########################################################################
+  output$FinalHyperparams <- renderTable({
+    mod <- getTrainedFinalisedModel()
+    req(mod)
+    req(is(mod, "train"))
+    req(mod$bestTune)
+    xtable(mod$bestTune, caption = "Optimum hyper-parameters")
+  }, digits = 4)
 
   ###########################################################################
-  output$Performance <- renderPrint({
-    req(input$SelectedModel)
-    mod <- react$ModelSet[[input$SelectedModel]]
-    req(!inherits(mod, "character"))
+  output$GradOptimize <- renderPlot({
+    if (input$LockHyper) {
+      req(input$ResultsFor)
+      mod <- react$ModelSet[[input$ResultsFor]]
+    } else {
+      mod <- getTrainedFinalisedModel()
+    }
+    req(mod)
+    req(mod, is(mod, "train") | is(mod, "caretStack"))
+    trellis.par.set(caretTheme())
+    try({
+      plot(mod, main = paste(sep = " - ", "Hyper-parameter optimisation", input$ResultsFor))
+    }, silent = TRUE)
+}, bg = "transparent")
 
+  ###########################################################################
+  output$GradResiduals <- renderPlot({
+    req(input$ResultsFor)
+    mod <- react$ModelSet[[input$ResultsFor]]
+    req(!inherits(mod, "character"))
+    modf <- getTrainedFinalisedModel()
+    req(is(mod,"train"), is(modf,"train"))
+    if (input$ProbType == "Classification") {
+      test <- getTestData()
+      isY <- colnames(test) == input$Target
+      y <- test[, isY, drop = FALSE]
+      Before <- as.matrix(predict.train(mod, newdata = test, type = "prob", na.action = na.pass))
+      After <- as.matrix(predict(modf, newdata = test, type = "prob", na.action = na.pass))
+      if (all(is.na(Before))) {
+        # No class probabilities
+      } else {
+        # Class probabilities
+        yy <- as.matrix(predict(caret::dummyVars(~., data = y, fullRank = FALSE, levelsOnly = TRUE), newdata = y, na.action = na.pass))
+        residualB <- yy - Before
+        residualA <- yy - After
+        m <- 1
+        range <- c(-m,m)
+        Triangles <- data.frame(x1 = c(m, m, 0, -m, -m, 0), y1 = c(m, 0, 0, 0, -m, 0))
+        plotDataA <- c()
+        plotDataB <- c()
+        for (l in 1:ncol(residualB)) {
+          plotDataA <- c(plotDataA, residualA[,l, drop = TRUE])
+          plotDataB <- c(plotDataB, residualB[,l, drop = TRUE])
+        }
+        plotData <- data.frame(After = plotDataA, Before = plotDataB, Type = test[, isY, drop = TRUE])
+        ggplot2::ggplot() +
+          geom_point(data = plotData, mapping = aes(x = Before, y = After, colour = Type)) +
+          geom_abline(slope = 1, intercept = 0, colour = "blue") +
+          geom_hline(yintercept = 0, colour = "blue") +
+          geom_polygon(data = Triangles, mapping = aes(x = x1, y = y1, fill = "green"), alpha = 0.1, show.legend = FALSE) +
+          scale_fill_manual(values = c("green","red")) +
+          labs(title = "Class Probability Residuals for test data", subtitle = "(before and after finalisation)", y = "After", x = "Before") +
+          coord_fixed(ratio = 1, xlim = range, ylim = range, expand = TRUE)
+      }
+
+    } else if (input$ProbType == "Regression") {
+      test <- getTestData()
+      isY <- colnames(test) == input$Target
+      y <- test[, isY]
+      Before <- y - predict(mod, newdata = test, na.action = na.exclude)
+      After <- y - predict(modf, newdata = test, na.action = na.exclude)
+      d <- data.frame(Before, After)
+      m <- max(abs(c(d$Before, d$After)), na.rm = TRUE)
+      range <- c(-m,m)
+      Triangles <- data.frame(x1 = c(m, m, 0, -m, -m, 0), y1 = c(m, 0, 0, 0, -m, 0))
+      ggplot2::ggplot(data = d) +
+        geom_point(mapping = aes(x = Before, y = After)) +
+        geom_abline(slope = 1, intercept = 0, colour = "blue") +
+        geom_hline(yintercept = 0, colour = "blue") +
+        geom_polygon(data = Triangles, mapping = aes(x = x1, y = y1, fill = "green"), alpha = 0.1, show.legend = FALSE) +
+        scale_fill_manual(values = c("green","red")) +
+        labs(title = "Residuals (before and after finalisation) for test data", y = "After", x = "Before") +
+        coord_fixed(ratio = 1, xlim = range, ylim = range, expand = TRUE)
+    }
+  }, bg = "transparent")
+  
+  ###########################################################################
+  output$Performance1 <- renderPrint({
+    req(input$SelectedModel)
+    mod <- getGraduatingModel()
+    req(!is(mod, "character"))
+    summary(mod$finalModel)
+  })
+  ###########################################################################
+  output$Performance1Plus <- renderTable({
+    req(input$SelectedModel)
+    mod <- getGraduatingModel()
+    req(!is(mod, "character"))
     test <- getTestData()
-    isY <- colnames(test) == input$Class
+    isY <- colnames(test) == input$Target
     predictions <- predict(mod, newdata = test[, !isY])
     d <- data.frame(test[, isY], predictions)
     colnames(d) <- c("obs", "pred")
-
     if (input$ProbType == "Classification") {
-      N <- sum(!is.na(d$pred))
-      n <- sum(is.na(d$pred))
-      results <- c("Num predicted" = N, "Num pred Failed" = n)
-      print(results, digits = 1)
+      cm <- caret::confusionMatrix(data = d$pred, reference = d$obs, positive = input$Positive)
+      results <- as.matrix(cm$byClass)
+      results <- t(results)
+      rownames(results) <- NULL
     } else {
       ds <- defaultSummary(data = d)
       RMSE <- ds[["RMSE"]]
@@ -2064,37 +4591,501 @@ shinyServer(function(input, output, session) {
       MAE <- ds[["MAE"]]
       N <- sum(!is.na(d$pred))
       n <- sum(is.na(d$pred))
-      upperlim <- ds[["RMSE"]] * sqrt(N / qchisq(0.05,N))
+      upperlim <- ds[["RMSE"]] * sqrt(N / qchisq(1 - input$Probability/100,N))
       nMod <- react$ModelSet[["null"]]
       if (!is.null(nMod) && !inherits(nMod, "character")) {
         predictions <- predict(nMod, newdata = test[, !isY])
         d <- data.frame(test[, isY], predictions)
         colnames(d) <- c("obs", "pred")
-        ns <- defaultSummary(data = d, lev = lev)
+        ns <- defaultSummary(data = d)
         RelRMSE <- ds[["RMSE"]] / ns[["RMSE"]]
         RelMAE <- ds[["MAE"]] / ns[["MAE"]]
-        results <- c("RMSE" = RMSE, "Rsquared" = R2, "Mean Absol Err" = MAE, "95% conf. RMSE below" = upperlim)
-        print(results, digits = 6)
-        results <- c("RMSE %" = RelRMSE*100, "MAE %" = RelMAE*100)
-        print(results, digits = 3)
+        results <- data.frame(signif(RMSE,4), signif(R2,6), signif(MAE,4), signif(upperlim,4), signif(RelRMSE*100,3), signif(RelMAE*100,3), N, n)
+        colnames(results) <- c("RMSE", "Rsquared", "Mean Absol Err", paste0(input$Probability,"% conf. RMSE below"), "RMSE %", "MAE %", "Num predicted", "Num pred Failed")
       } else {
-        results <- c("RMSE" = RMSE, "Rsquared" = R2, "Mean Absol Err" = MAE, "95% confident RMSE below" = upperlim)
-        print(results, digits = 6)
+        results <- data.frame(signif(RMSE,4), signif(R2,6), signif(MAE,4), signif(upperlim,4), N, n)
+        colnames(results) <- c("RMSE", "Rsquared", "Mean Absol Err", paste0(input$Probability,"% conf. RMSE below"), "Num predicted", "Num pred Failed")
       }
-      results <- c("Num predicted" = N, "Num pred Failed" = n)
-      print(results, digits = 1)
+    }
+    results
+  })
+  
+  ###########################################################################
+  output$Performance2 <- renderPrint({
+    req(input$SelectedModel)
+    mod <- getTrainedFinalisedModel()
+    req(!is(mod, "character"))
+    print(summary(mod$finalModel))
+    # test <- getTestData2()
+    # isY <- colnames(test) == input$Target
+    # predictions <- predict(mod, newdata = test[, !isY])
+    # d <- data.frame(test[, isY], predictions)
+    # colnames(d) <- c("obs", "pred")
+    # if (input$ProbType == "Classification") {
+    #   N <- sum(!is.na(d$pred))
+    #   n <- sum(is.na(d$pred))
+    #   results <- c("Num predicted" = N, "Num pred Failed" = n)
+    #   print(results, digits = 1)
+    # } else {
+    #   ds <- defaultSummary(data = d)
+    #   RMSE <- ds[["RMSE"]]
+    #   R2 <- ds[["Rsquared"]]
+    #   MAE <- ds[["MAE"]]
+    #   N <- sum(!is.na(d$pred))
+    #   n <- sum(is.na(d$pred))
+    #   upperlim <- ds[["RMSE"]] * sqrt(N / qchisq(1 - input$Probability/100,N))
+    #   nMod <- react$ModelSet[["null"]]
+    #   if (!is.null(nMod) && !inherits(nMod, "character")) {
+    #     predictions <- predict(nMod, newdata = test[, !isY])
+    #     d <- data.frame(test[, isY], predictions)
+    #     colnames(d) <- c("obs", "pred")
+    #     ns <- defaultSummary(data = d, lev = lev)
+    #     RelRMSE <- ds[["RMSE"]] / ns[["RMSE"]]
+    #     RelMAE <- ds[["MAE"]] / ns[["MAE"]]
+    #     results <- c(RMSE, R2, MAE, upperlim)
+    #     names(results) <- c("RMSE", "Rsquared", "Mean Absol Err", paste0(input$Probability,"% conf. RMSE below"))
+    #     print(results, digits = 6)
+    #     results <- c("RMSE %" = RelRMSE*100, "MAE %" = RelMAE*100)
+    #     print(results, digits = 3)
+    #   } else {
+    #     results <- c(RMSE, R2, MAE, upperlim)
+    #     names(results) <- c("RMSE", "Rsquared", "Mean Absol Err", paste0(input$Probability,"% conf. RMSE below"))
+    #     print(results, digits = 6)
+    #   }
+    #   results <- c("Num predicted" = N, "Num pred Failed" = n)
+    #   print(results, digits = 1)
+    # }
+  })
+  
+  # reactive getResampleIndices ---------------------------------------------------
+  getResampleIndices <- reactive({
+    tc <- getTrainControl()
+    index <- tc$index
+    data <- getSomeTrainData()
+    rows <- nrow(data)
+    #set the correct row order
+    if (input$Groups != "") {
+      strat <- input$Groups
+    } else {
+      strat <- input$Target
+    }
+    stratifier <- data[,strat, drop = TRUE]
+    ord <- order(stratifier)
+    if (is.numeric(stratifier) & length(unique(stratifier)) > getContinuousDebounced()[1]) {
+      stratifier <- dplyr::ntile(x = stratifier, n = min(5, length(unique(stratifier))))
+    } else {
+      stratifier <- as.integer(as.factor(stratifier))
+    }
+    d <- data.frame(row = 1:rows)
+    # TODO make this show counts in order to see the effect of "with replacement"
+    props <- vector(mode = "numeric", length(index))
+    for (i in 1:length(index)) {
+      vec <- ifelse(d$row %in% index[[i]], 0, max(stratifier) + 1)
+      d <- cbind(d, vec)
+      props[i] <- sum(vec == 0)/rows
+    }
+    d <- cbind(d, stratifier)
+    d <- d[ord,]
+    d$row <- (1:rows)*100/rows
+    names(index) <- paste0(names(index), " ", round(props*100), "%")
+    colnames(d) <- c("Observation", names(index), paste0("-",strat))
+    tidyr::pivot_longer(data = d, cols = -Observation, names_to = "Resample", values_to = "Bag_Type")
+  })
+  
+  # render plot ResampleChart ---------------------------------------------------
+  output$ResampleChart <- renderPlotly({
+    cbp <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+    pivot <- getResampleIndices()
+    plot <- ggplot(data = pivot, aes(x = Resample, y = Observation, text = Bag_Type)) +
+      geom_raster(aes_string(fill = "Bag_Type")) +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), legend.position = "none") +
+      scale_y_reverse() +
+      scale_fill_gradientn(colours = cbp) +
+      labs(x = "", y = "Observations", title = paste(input$Method, "resampling pattern"))
+    plotly(plot)
+  })
+
+  
+  # reactive getFinalPredictions ---------------------------------------------------------------------------------------------
+  getFinalPredictions <- reactive({
+    mod <- getTrainedFinalisedModel()
+    req(mod, !inherits(mod, "error"))
+    predict(mod, getData(), type = "raw", na.action = na.exclude())
+  })
+
+
+  
+  # render Infobox NullHandling ---------------------------------------------------
+  output$NullHandling <- renderInfoBox({
+    p <- getFinalPredictions()
+    count <- sum(is.na(p))
+    prop <- sum(is.na(p)) / length(p) * 100
+    infoBox(title = "Missing predictions", subtitle = "Due to missing predictors", icon = icon("skull"), value = paste0(count, " (",signif(prop, digits = 3),"%)"), color = ANAColour, fill = TRUE)
+  })
+  
+  # render Infobox PredInterval ---------------------------------------------------
+  output$PredInterval <- renderInfoBox({
+    d <- getData()
+    req(isRoleValid(input$Target, d))
+    predi <- getFinalPredictions()
+    if (input$ProbType == "Regression") {
+      obse <- d[, input$Target, drop = TRUE]
+      absError <- abs(obse - predi)
+      relError <- abs(absError / predi)
+      pi <- quantile(absError, probs = input$Probability/100, na.rm = TRUE)
+      rpi <- 100 * quantile(relError, probs = input$Probability/100, na.rm = TRUE)
+      infoBox(title = paste0("Empirical (", input$Probability, "%) prediction interval overall"), icon = icon("exchange-alt"), value = paste0("+/- ",signif(pi, digits = 3), " (",signif(rpi, digits = 3),"%)"), color = ANAColour, fill = TRUE)
+    } else if (input$ProbType == "Classification") {
+      #TODO 
     }
   })
-
+  
+  
+  
+  
+    
   ###########################################################################
-  output$SelectedModelSummary <- renderPrint({
-    mod <- react$ModelSet[[input$SelectedModel]]
-    req(mod)
-    req(!inherits(mod, "character"))
-    try({
-      print(mod$finalModel)
-    }, silent = TRUE)
+  observeEvent(input$Next, {
+    if (input$Navbar == "DataLoad") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "DataColumns")
+    } else if (input$Navbar == "DataColumns") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "RolesChart")
+    } else if (input$Navbar == "RolesChart") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "DataSummary")
+    } else if (input$Navbar == "DataSummary") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "DataTable")
+    } else if (input$Navbar == "DataTable") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "SequenceChart")
+    } else if (input$Navbar == "SequenceChart") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MissingPattern")
+    } else if (input$Navbar == "MissingPattern") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Outliers")
+    } else if (input$Navbar == "Outliers") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Continuity")
+    } else if (input$Navbar == "Continuity") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Observations")
+    } else if (input$Navbar == "Observations") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Variables")
+    } else if (input$Navbar == "Variables") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Boxplots")
+    } else if (input$Navbar == "Boxplots") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Bagplot")
+    } else if (input$Navbar == "Bagplot") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Correlation")
+    } else if (input$Navbar == "Correlation") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Pairs")
+    } else if (input$Navbar == "Pairs") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "DistPlot")
+    } else if (input$Navbar == "DistPlot") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Clusters")
+    } else if (input$Navbar == "Clusters") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MissSummary")
+    } else if (input$Navbar == "MissSummary") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MissCorrelation")
+    } else if (input$Navbar == "MissCorrelation") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MissPattern")
+    } else if (input$Navbar == "MissPattern") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MissExplain")
+    } else if (input$Navbar == "MissExplain") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MissVariables")
+    } else if (input$Navbar == "MissVariables") {
+    } else if (input$Navbar == "Sampling") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "ProcessingRecipe")
+    } else if (input$Navbar == "ProcessingRecipe") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "ProcessingSummary")
+    } else if (input$Navbar == "ProcessingSummary") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "ProcessingTable")
+    } else if (input$Navbar == "ProcessingTable") {
+      #TODO cannot currently select menu & expand sub-menu
+      updateTabItems(session = session, inputId = "Navbar", selected = "MethodCriteria")
+    } else if (input$Navbar == "MethodCriteria") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MethodSimilarity")
+    } else if (input$Navbar == "MethodSimilarity") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MethodTable")
+    } else if (input$Navbar == "MethodTable") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "MethodSummary")
+    } else if (input$Navbar == "MethodSummary") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Train")
+    } else if (input$Navbar == "Train") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "ModelMetrics")
+    } else if (input$Navbar == "ModelMetrics") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "ModelCorrelation")
+    } else if (input$Navbar == "ModelCorrelation") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "ModelHierarchy")
+    } else if (input$Navbar == "ModelHierarchy") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "ModelSelection")
+    } else if (input$Navbar == "ModelSelection") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "GradSummary")
+    } else if (input$Navbar == "GradSummary") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "GradFit")
+    } else if (input$Navbar == "GradFit") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "GradParameters")
+    } else if (input$Navbar == "GradParameters") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "GradResiduals")
+    } else if (input$Navbar == "GradResiduals") {
+      updateTabItems(session = session, inputId = "Navbar", selected = "Analyse")
+    }
   })
+  
+# * Help ----------------------------------------------------------------------
 
-
+  # reactive getHelp2 ----------------------------------------------------------------------
+  getHelp2 <- reactive({
+    showNotification("The help information is loading", id = "HelpLoad", duration = 5)
+    df <- getHelp()
+    # df$content <- as.character(df$content)
+    # df$placement <- as.character(df$placement)
+    # df$type <- as.character(df$type)
+    # df$placement[is.na(df$placement)] <- "bottom"
+    df
+  })
+  
+  
+# observe -----------------------------------------------------------------
+  observeEvent(input$Help, {
+    helpId <- "Help"
+    if (input$Help %% 2 == 0) {
+      updateActionButton(session = session, inputId = helpId, icon = icon("question-circle"))
+    } else {
+      updateActionButton(session = session, inputId = helpId, icon = icon("question"))
+    }
+    
+    df <- getHelp2()
+    if (input$Help %% 2 == 0) {
+      for (row in 1:nrow(df)) {
+        content <- as.character(df[row, "content"])
+        if (is.na(content)) next
+        shinyBS::removeTooltip(session = session, id = as.character(df[row, "id"]))
+      }
+      showNotification("Hover tooltips are disabled", duration = 5)
+    } else {
+      for (row in 1:nrow(df)) {
+        content <- as.character(df[row, "content"])
+        if (is.na(content)) next
+        shinyBS::addTooltip(session = session, id = as.character(df[row, "id"]), title = content, placement = as.character(df[row, "placement"]))
+      }
+      showNotification("Hover tooltips are enabled", duration = 5)
+    }
+  })
+  
+  # Observe -------------------------------------------------------------------------------------------
+  # Overwrites the help spreadsheet (button is commented out)
+  observeEvent(
+    input$HelpExport,
+    {
+      inputs <- names(input)
+      df1 <- data.frame(id = inputs, content = paste("Tooltip for",inputs), placement = "bottom", type = "input", stringsAsFactors = FALSE)
+      df2 <- getHelp2()
+      df3 <- anti_join(df1, df2, by = "id")
+      df <- rbind(df2, df3)
+      xlxs::write.xlsx(df, file = "help.xlsx", sheetName = "Sheet1", col.names = TRUE, row.names = FALSE, append = FALSE)
+      showNotification("Help spreadsheet written")
+    }
+  )
+  
+  
+  
+  ###########################################################################
+  observe({
+    req(input$Navbar)
+    hideElement(id = "Header")
+    hideElement(id = "DateFormat")
+    hideElement(id = "Sep")
+    hideElement(id = "Quote")
+    hideElement(id = "Decimal")
+    hideElement(id = "MissingStrings")
+    hideElement(id = "MaxRows")
+    hideElement(id = "Continuous")
+    hideElement(id = "HideIrrelevant")
+    hideElement(id = "ScaleChart")
+    hideElement(id = "UseYJ")
+    hideElement(id = "CorAbs")
+    hideElement(id = "CorGrouping")
+    hideElement(id = "CorMethod")
+    hideElement(id = "UseDummy")
+    hideElement(id = "SortOrder")
+    hideElement(id = "Cols")
+    hideElement(id = "Multiplier")
+    hideElement(id = "NullNormalise")
+    hideElement(id = "HideWorse")
+    hideElement(id = "ExcludeNull")
+    hideElement(id = "HideTimings")
+    hideElement(id = "ShowNotches")
+    hideElement(id = "Probability")
+    hideElement(id = "ObserveMvOut")
+    hideElement(id = "Observe1DOut")
+    hideElement(id = "ObserveMiss")
+    hideElement(id = "MergeWeighting")
+    hideElement(id = "ConsiderCont")
+    hideElement(id = "ConsiderNom")
+    # hideElement(id = "ConsiderImbal")
+    hideElement(id = "ConsiderOut")
+    hideElement(id = "ConsiderNZV")
+    hideElement(id = "MergeVarImp")
+    hideElement(id = "OneHot")
+    hideElement(id = "OtherThreshold")
+    hideElement(id = "NumTerms")
+    hideElement(id = "Eps")
+    hideElement(id = "MinPts")
+    hideElement(id = "Parallel")
+    hideElement(id = "NullModel")
+    hideElement(id = "Positive")
+    hideElement(id = "VarThresh")
+    hideElement(id = "CorrThresh")
+    hideElement(id = "NumComp")
+    hideElement(id = "PolyDegree")
+    hideElement(id = "Klof")
+    if (input$Navbar == "DataLoad") {
+      showElement(id = "Header")
+      showElement(id = "DateFormat")
+      showElement(id = "Sep")
+      showElement(id = "Quote")
+      showElement(id = "Decimal")
+      showElement(id = "MissingStrings")
+    } else if (input$Navbar == "DataColumns") {
+      showElement(id = "Continuous")
+      showElement(id = "MaxRows")
+    } else if (input$Navbar == "DataChart") {
+      showElement(id = "Continuous")
+      showElement(id = "MaxRows")
+    } else if (input$Navbar == "DataSummary") {
+      showElement(id = "Continuous")
+      showElement(id = "MaxRows")
+    } else if (input$Navbar == "DataTable") {
+      showElement(id = "Continuous")
+      showElement(id = "MaxRows")
+    } else if (input$Navbar ==  "SequenceChart") {
+      showElement(id = "MaxRows")
+      showElement(id = "SortOrder")
+      showElement(id = "Cols")
+    } else if (input$Navbar == "MissingPattern") {
+      showElement(id = "MaxRows")
+      showElement(id = "HideIrrelevant")
+      showElement(id = "SortOrder")
+    } else if (input$Navbar == "Outliers") {
+      showElement(id = "MaxRows")
+      showElement(id = "Continuous")
+      showElement(id = "UseYJ")
+      showElement(id = "SortOrder")
+    } else if (input$Navbar == "Continuity") {
+      showElement(id = "MaxRows")
+      showElement(id = "Continuous")
+      showElement(id = "ScaleChart")
+    } else if (input$Navbar == "Observations") {
+      showElement(id = "MaxRows")
+      showElement(id = "UseYJ")
+      showElement(id = "Multiplier")
+      showElement(id = "ObserveMvOut")
+      showElement(id = "Observe1DOut")
+      showElement(id = "ObserveMiss")
+      if (input$Weights != "") {
+        showElement(id = "MergeWeighting")
+      }
+      showElement(id = "Klof")
+    } else if (input$Navbar == "Variables") {
+      showElement(id = "MaxRows")
+      showElement(id = "Continuous")
+      showElement(id = "ScaleChart")
+      showElement(id = "Multiplier")
+      showElement(id = "UseYJ")
+      showElement(id = "ConsiderCont")
+      showElement(id = "ConsiderNom")
+      showElement(id = "ObserveMiss")
+      # showElement(id = "ConsiderImbal")
+      showElement(id = "ConsiderOut")
+      showElement(id = "ConsiderNZV")
+      if (input$Target != "") {
+        showElement(id = "MergeVarImp")
+      }
+    } else if (input$Navbar == "Boxplots") {
+      showElement(id = "MaxRows")
+      showElement(id = "ScaleChart")
+      showElement(id = "Continuous")
+      showElement(id = "HideIrrelevant")
+      showElement(id = "UseYJ")
+      showElement(id = "Multiplier")
+    } else if (input$Navbar == "Bagplot") {
+      showElement(id = "MaxRows")
+      showElement(id = "Continuous")
+      showElement(id = "ScaleChart")
+      showElement(id = "UseYJ")
+      showElement(id = "Multiplier")
+    } else if (input$Navbar == "Correlation") {
+      showElement(id = "Parallel")
+      showElement(id = "MaxRows")
+      showElement(id = "Continuous")
+      showElement(id = "CorAbs")
+      showElement(id = "CorMethod")
+      showElement(id = "CorGrouping")
+      showElement(id = "Cols")
+    } else if (input$Navbar == "Pairs") {
+      showElement(id = "Parallel")
+      showElement(id = "MaxRows")
+      showElement(id = "Continuous")
+      showElement(id = "Cols")
+    } else if (input$Navbar ==  "DistPlot") {
+      showElement(id = "MaxRows")
+      showElement(id = "Eps")
+      showElement(id = "MinPts")
+      showElement(id = "ScaleChart")
+    } else if (input$Navbar ==  "Clusters") {
+      showElement(id = "MaxRows")
+      showElement(id = "MinPts")
+      showElement(id = "ScaleChart")
+    } else if (input$Navbar ==  "MissSummary") {
+      showElement(id = "MaxRows")
+    } else if (input$Navbar ==  "MissCorrelation") {
+      showElement(id = "MaxRows")
+    } else if (input$Navbar ==  "MissPattern") {
+      showElement(id = "MaxRows")
+    } else if (input$Navbar ==  "MissExplain") {
+      showElement(id = "MaxRows")
+      showElement(id = "Parallel")
+    } else if (input$Navbar ==  "MissVariables") {
+      showElement(id = "MaxRows")
+    } else if (input$Navbar ==  "Sampling") {
+      showElement(id = "Probability")
+    } else if (input$Navbar ==  "ProcessingSteps" | input$Navbar ==  "ProcessingRecipe" | input$Navbar == "ProcessingSummary") {
+      showElement(id = "Continuous")
+      showElement(id = "MaxRows")
+      toggleElement(id = "OneHot", condition = input$Convert)
+      toggleElement(id = "OtherThreshold", condition = input$Other)
+      toggleElement(id = "Eps", condition = input$Clusters)
+      toggleElement(id = "MinPts", condition = input$Clusters)
+      toggleElement(id = "PolyDegree", condition = input$Poly)
+      toggleElement(id = "CorrThresh", condition = input$DimReduce == "corr")
+      toggleElement(id = "VarThresh", condition = input$DimReduce == "pca")
+      toggleElement(id = "NumComp", condition = input$DimReduce %in% c("ica","pls", "umap", "kpca","isomap"))
+      toggleElement(id = "NumTerms", condition = input$String %in% c("hash", "embed"))
+    } else if (input$Navbar ==  "Train") {
+      showElement(id = "Parallel")
+      showElement(id = "NullModel")
+      if (input$ProbType == "Classification") {
+        showElement(id = "Positive")
+      }
+    } else if (input$Navbar ==  "ModelMetrics") {
+      mods <- getResampledModels()
+      shinyjs::toggle(id = "NullNormalise", condition = length(mods$models) > 1 & input$NullModel)
+      shinyjs::toggle(id = "HideWorse", condition = length(mods$models) > 1 & input$NullModel)
+      shinyjs::toggle(id = "SelectedModelCM", condition = input$ProbType == "Classification")
+      shinyjs::toggle(id = "FinalModelCM", condition = input$ProbType == "Classification")
+      shinyjs::toggle(id = "ExcludeNull", condition = input$NullModel)
+      shinyjs::showElement(id = "ShowNotches")
+      shinyjs::showElement(id = "HideTimings")
+    } else if (input$Navbar ==  "ModelCorrelation") {
+      mods <- getResampledModels()
+      shinyjs::toggle(id = "HideWorse", condition = length(mods$models) > 1 & input$NullModel)
+      shinyjs::toggle(id = "ExcludeNull", condition = input$NullModel)
+    } else if (input$Navbar ==  "ModelHierarchy") {
+      mods <- getResampledModels()
+      shinyjs::toggle(id = "HideWorse", condition = length(mods$models) > 1 & input$NullModel)
+      shinyjs::toggle(id = "ExcludeNull", condition = input$NullModel)
+    } else if (input$Navbar ==  "GradSummary") {
+      showElement(id = "Parallel")
+    } else if (input$Navbar ==  "GradFit") {
+    } else if (input$Navbar ==  "GradParameters") {
+    }
+  })
+  
 })
