@@ -110,6 +110,15 @@ maxRows <- 1000
 roots <- c(wd = ".")
 FullHeight <- "640px"
 
+# Spinner style
+SPINNER_COLOUR <- "#FFFFFF"
+SPINNER_TYPE <- 4
+SPINNER_SIZE <- 2
+
+PROJECT_FOLDER <- "Projects"
+INPUT <- list()
+REACT <- list()
+
 # Available Colours: red,yellow,aqua,blue,light-blue,green,navy,teal,olive,lime,orange,fuchsia,purple,maroon,black,
 DATAColour <- "light-blue"
 EDAColour <- "blue"
@@ -124,7 +133,6 @@ ANAColour <- "orange"
 # * 2 * 3 Source files ----
 source("RecipeSteps.R")
 source("pps.R")
-
 
 # * 3 * Functions  ----
 # * 3 * 1 Utility ----
@@ -210,6 +218,16 @@ formattedColNames <- function(df) {
   fcols <- colnames(df)
   names(fcols) <- paste0(fcols," [", cname,"]")
   fcols
+}
+
+equals <- function(x,y) {
+  if ( !any(class(x) %in% c("NULL", "NA", "character", "logical", "numeric"))) return(identical(x,y))
+  if (length(x) != length(y)) return(FALSE)
+  if (all(is.null(x) & is.null(y))) return(TRUE)
+  if (any(is.null(x) | is.null(y))) return(FALSE)
+  if (all(is.na(x) & is.na(y))) return(TRUE)
+  if (any(is.na(x) | is.na(y))) return(FALSE)
+  return(all(identical(x,y)))
 }
 
 #' allClass
