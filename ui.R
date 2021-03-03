@@ -40,9 +40,9 @@ header <- shinydashboardPlus::dashboardHeaderPlus(
                                  sliderInput(inputId = "ConsiderOut", label = "Rate continuous outliers", min = 0, max = 3, step = 0.1, value = 1),
                                  sliderInput(inputId = "ConsiderNZV", label = "Rate near-zero-variance", min = 0, max = 3, step = 0.1, value = 1),
                                  checkboxInput(inputId = "MergeVarImp", label = "Scale by variable importance", value = FALSE),
-                                 selectInput(inputId = "CorMethod", label = "Correlation method", choices = c("Pearson", "Spearman" , "Kendal", "Distance" , "Predictive Power"), selected = "pearson"),
+                                 selectizeInput(inputId = "CorMethod", label = "Correlation method", choices = c("Pearson", "Spearman" , "Kendal", "Distance" , "Predictive Power"), selected = "pearson"),
                                  checkboxInput(inputId = "CorAbs", label = "Use absolute correlation?", value = TRUE),
-                                 selectInput(inputId = "CorGrouping", label = "Correlation grouping", choices = c("ward.D", "ward.D2", "single", "complete", "average", "mcquitty", "median", "centroid", "none"), selected = "none"),
+                                 selectizeInput(inputId = "CorGrouping", label = "Correlation grouping", choices = c("ward.D", "ward.D2", "single", "complete", "average", "mcquitty", "median", "centroid", "none"), selected = "none"),
                                  sliderInput(inputId = "NumTerms", label = "Number of encoded features", min = 1, max = 10, value = 5, step = 1),
                                  #sliderInput(inputId = "MissRatio", label = "Missingness ratio", min = 10, max = 100, value = 50, step = 5),
                                  sliderInput(inputId = "VarThresh", label = "Proportion of explained variance", min = 0.8, max = 0.99, step = 0.01, value = 0.95),
@@ -56,13 +56,14 @@ header <- shinydashboardPlus::dashboardHeaderPlus(
                                  sliderInput(inputId = "Klof", label = "Size of neighbourhood", min = 2, max = 30, step = 1, value = 4),
                                  checkboxInput(inputId = "Parallel", label = "Use parallel processing", value = TRUE),
                                  checkboxInput(inputId = "NullModel", label = "Add a null model", value = TRUE),
-                                 selectInput(inputId = "Positive", label = "Positive class", choices = c(), selected = NULL),
+                                 selectizeInput(inputId = "Positive", label = "Positive class", choices = c(), selected = NULL),
+                                 selectizeInput(inputId = "DimReductType", label = "Chart-based dimensional reduction", choices = c(), selected = NULL),
                                  circle = FALSE, status = "primary", icon = icon("wrench"), width = "600px"
     ),
     actionLink(inputId = "Save", label = "", icon = icon("save")),
     actionLink(inputId = "Help", label = "", icon = icon("question-circle")),
     shinyBS::bsTooltip(id = "Help", title = "Activate/Deactivate tool-tips"),
-    actionLink(inputId = "Next", label = "", icon = icon("step-forward")), 
+    actionLink(inputId = "Next", label = "", icon = icon("step-forward"))
     #actionLink(inputId = "HelpExport", label = "", icon = icon("file-export")) 
   )
 )
@@ -120,16 +121,16 @@ sidebar <- shinydashboard::dashboardSidebar(
                        menuSubItem(text = "Processed", tabName = "ProcessingTable", icon = icon("table"))
               ),
 
-              menuItem(text = "Methods", icon = icon("check-double"), expandedName = "Methods",
+              menuItem(text = "Methods", tabName = "Methods", icon = icon("check-double"),
                        menuSubItem(text = "Criteria", tabName = "MethodCriteria", icon = icon("sliders")),
                        menuSubItem(text = "Map", tabName = "MethodSimilarity", icon = icon("map-marked-alt")),
                        menuSubItem(text = "List", tabName = "MethodTable", icon = icon("check-square")),
                        menuSubItem(text = "Summary", tabName = "MethodSummary", icon = icon("table"))
               ),
 
-              menuItem(text = "Train", icon = icon("dumbbell"), tabName = "Train"),
+              menuItem(text = "Train Models", tabName = "Train", icon = icon("dumbbell")),
 
-              menuItem(text = "Models", tabName = "Select", icon = icon("balance-scale"),
+              menuItem(text = "Model Selection", tabName = "Select", icon = icon("balance-scale"),
                        menuSubItem(text = "Metrics", tabName = "ModelMetrics", icon = icon("tachometer-alt")),
                        menuSubItem(text = "Correlation", tabName = "ModelCorrelation", icon = icon("th")),
                        menuSubItem(text = "Hierarchy", tabName = "ModelHierarchy", icon = icon("sitemap")),
@@ -170,7 +171,8 @@ body <- shinydashboard::dashboardBody(
                             fluidRow(
                               column(
                                 width = 6, offset = 3,
-                                shinyFiles::shinyFilesButton(id = "ServerFile", label = "Choose a server file", title = "Choose a data file that resides where R is running", multiple = FALSE)
+                                shinyFiles::shinyFilesButton(id = "ServerFile", label = "Choose a server file", title = "Choose a data file that resides where R is running", multiple = FALSE),
+                                disabled(shiny::textInput(inputId = "ServerFileName", label = "", value = ""))
                               )
                             )
                    ),
@@ -179,7 +181,8 @@ body <- shinydashboard::dashboardBody(
                               column(
                                 width = 4, offset = 3, 
                                 tags$div(id = "LocalFileDiv",  # the div takes a tool tip
-                                         fileInput(inputId = "LocalFile", label = "Choose a local file", multiple = FALSE)
+                                         fileInput(inputId = "LocalFile", label = "Choose a local file", multiple = FALSE),
+                                         hidden(shiny::textInput(inputId = "LocalFileName", label = "", value = ""))
                                 )
                               )
                             )
@@ -195,8 +198,8 @@ body <- shinydashboard::dashboardBody(
                             fluidRow(
                               column(
                                 width = 10, offset = 1,
-                                selectInput(inputId = "Package", label = "Choose an available package containing data", choices = c(.packages(all.available = TRUE)), selected = "caret"),
-                                selectInput(inputId = "DataSet", label = "Choose a data set", choices = c(), selected = NULL, width = "100%"),
+                                selectizeInput(inputId = "Package", label = "Choose an available package containing data", choices = c(.packages(all.available = TRUE)), selected = "caret"),
+                                selectizeInput(inputId = "DataSet", label = "Choose a data set", choices = c(), selected = NULL, width = "100%")
                               )
                             )
                    )
@@ -205,7 +208,8 @@ body <- shinydashboard::dashboardBody(
               column(
                 width = 9, offset = 3,
                 box(title = "Project", background = DATAColour,
-                    textInput(inputId = "Project", label = "Input a project name", value = "")
+                    selectizeInput(inputId = "Project", label = "Input a project name", choices = c(), multiple = FALSE, selected = NULL, options = list(create = TRUE)),
+                    actionButton(inputId = "LoadProjectReq", label = "Load Project", icon = icon("play"))
                 )
               )
             ),
@@ -214,35 +218,35 @@ body <- shinydashboard::dashboardBody(
               infoBoxOutput(outputId = "VariableCount", width = 6)
             )
     ),
-
+    
     tabItem(tabName = "DataColumns",
             box(title = "Data Roles", solidHeader = TRUE, background = DATAColour, width = 12, collapsible = TRUE, 
                 fluidRow(
                   column(
                     width = 2,
-                    selectInput(inputId = "Target", label = "Outcome", choices = "", selected = "", multiple = FALSE),
+                    selectizeInput(inputId = "Target", label = "Outcome", choices = "", selected = "", multiple = FALSE),
                     plotOutput("ClassPieChart", height = "50px")
                   ),
                   
                   column(
                     width = 2,
                     selectizeInput(inputId = "ID", label = "Identifier", choices = c(), selected = c(), options = list(placeholder = 'Assign an ID column')),
-                    checkboxInput(inputId = "AddIds", label = "Convert row names to a variable", value = FALSE),
+                    checkboxInput(inputId = "AddIds", label = "Convert row names to a variable", value = FALSE)
                   ),
                   column(
                     width = 2,
-                    selectInput(inputId = "HideCol", label = "Unused", choices = "", selected = "", multiple = TRUE),
+                    selectizeInput(inputId = "HideCol", label = "Unused", choices = "", selected = "", multiple = TRUE)
                   ),
                   column(
                     width = 2,
-                    selectInput(inputId = "PreSplit", label = "Train-Test Partition", choices = "", selected = "", multiple = FALSE),
+                    selectizeInput(inputId = "PreSplit", label = "Train-Test Partition", choices = "", selected = "", multiple = FALSE),
                     plotOutput("SplitPieChart", height = "50px")
                   ),
                   column(
                     width = 2,
-                    selectInput(inputId = "Weights", label = "Observation Weighting", choices = "", selected = "", multiple = FALSE),
+                    selectizeInput(inputId = "Weights", label = "Observation Weighting", choices = "", selected = "", multiple = FALSE),
                     checkboxInput(inputId = "AddWeights", label = "Auto Balance", value = FALSE),
-                    selectInput(inputId = "BalanceFactors", label = "Balance Factors", choices = "", selected = "", multiple = TRUE),
+                    selectizeInput(inputId = "BalanceFactors", label = "Balance Factors", choices = "", selected = "", multiple = TRUE)
                   ),
                   column(
                     width = 2,
@@ -263,108 +267,99 @@ body <- shinydashboard::dashboardBody(
             ),
             fluidRow(
               infoBoxOutput(outputId = "TargetCheck", width = 6),
-              infoBoxOutput(outputId = "Ratio", width = 6)
+              infoBoxOutput(outputId = "RatioObs", width = 6)
             )
     ),
     
     tabItem(tabName = "RolesChart",
             box(title = "Data Roles", solidHeader = TRUE, collapsible = FALSE, width = 12, background = DATAColour,
-                withSpinner(
-                  plotlyOutput(outputId = "RoleTypeChart", height = FullHeight)
+                withSpinner(ui_element = plotlyOutput(outputId = "RoleTypeChart", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),            
-            
+    
     tabItem(tabName = "DataSummary",
             box(title = "Raw Data Summary", solidHeader = TRUE, collapsible = FALSE, width = 12, background = DATAColour, 
-                withSpinner(
-                  htmlOutput(outputId = "DataSummary", style = "color:black")
+                withSpinner(ui_element = htmlOutput(outputId = "DataSummary", style = "color:black"),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "DataTable",
             box(title = "Raw Data Table", solidHeader = TRUE, collapsible = FALSE, width = 12, background = DATAColour, 
-                withSpinner(
-                  DT::dataTableOutput(outputId = "Data")
+                withSpinner(ui_element = DT::dataTableOutput(outputId = "Data"),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "SequenceChart",
             box(title = "Sequence chart", solidHeader = TRUE, background = EDAColour, width = 12,
-              withSpinner(
-                plotOutput(outputId = "SequenceChart1", height = FullHeight)
-              ),
-              withSpinner(
-                plotOutput(outputId = "SequenceChart2", height = FullHeight)
-              ),
-              withSpinner(
-                plotOutput(outputId = "SequenceChart3", height = FullHeight)
-              ),
-              withSpinner(
-                plotOutput(outputId = "SequenceChart4", height = FullHeight)
-              ),
-              withSpinner(
-                plotOutput(outputId = "SequenceChart5", height = FullHeight)
-              )
+                withSpinner(ui_element = plotOutput(outputId = "SequenceChart1", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                ),
+                withSpinner(ui_element = plotOutput(outputId = "SequenceChart2", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                ),
+                withSpinner(ui_element = plotOutput(outputId = "SequenceChart3", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                            
+                ),
+                withSpinner(ui_element = plotOutput(outputId = "SequenceChart4", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                ),
+                withSpinner(ui_element = plotOutput(outputId = "SequenceChart5", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                )
             )
     ),
-
+    
     tabItem(tabName = "MissingPattern",
             box(title = "Missing pattern", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotlyOutput(outputId = "MissingChart1", height = FullHeight)
+                withSpinner(ui_element = plotlyOutput(outputId = "MissingChart1", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
-
+    
     tabItem(tabName = "Outliers", 
             box(title = "Outliers", solidHeader = TRUE, background = EDAColour, width = 12,
-                plotlyOutput(outputId = "OutlierPlots", height = FullHeight )
-                # fluidRow(
-                #   column(width = 8,
-                #          withSpinner(
-                #            plotlyOutput(outputId = "MD2", height = "600px")
-                #          )
-                #   ),
-                #   column(width = 4,
-                #          withSpinner(
-                #            plotlyOutput(outputId = "qqplot", height = "600px")
-                #          )
-                #   )
-                # )
-            )
-    ),
-
-    tabItem(tabName = "Continuity",
-            box(title = "Continuity", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotlyOutput(outputId = "RisingChart", height = FullHeight)
+                withSpinner(ui_element = plotlyOutput(outputId = "OutlierPlots", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
-
+    
+    tabItem(tabName = "Continuity",
+            box(title = "Continuity", solidHeader = TRUE, background = EDAColour, width = 12,
+                withSpinner(ui_element = plotlyOutput(outputId = "RisingChart", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                )
+            )
+    ),
+    
     tabItem(tabName = "Observations",
             box(title = "Observations", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotlyOutput(outputId = "NoveltyObservations", height = FullHeight)
+                withSpinner(ui_element = plotlyOutput(outputId = "NoveltyObservations", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "Variables",
             box(title = "Variables", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotlyOutput(outputId = "NoveltyColumns", height = FullHeight)
+                withSpinner(ui_element = plotlyOutput(outputId = "NoveltyColumns", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "Boxplots", width = 12,
             box(title = "Box Plots", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "NumericNovelties", height = FullHeight)
+                withSpinner(ui_element = plotOutput(outputId = "NumericNovelties", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
@@ -377,10 +372,10 @@ body <- shinydashboard::dashboardBody(
                          box(title = "Parameters", collapsible = TRUE, width = 12, solidHeader = TRUE, background = EDAColour, collapsed = TRUE,
                              fluidRow(
                                column(width = 6, 
-                                      selectInput(inputId = "DimReductType", label = "Style of Dimensional Reduction", choices = c(""), selected = ""),
+                                      selectizeInput(inputId = "DimReductType", label = "Style of Dimensional Reduction", choices = c(""), selected = "")
                                ),
                                column(width = 6,
-                                      selectInput(inputId = "DistanceMethod", label = "Distance metric", choices = c("euclidean","manhattan"), selected = "euclidean")
+                                      selectizeInput(inputId = "DistanceMethod", label = "Distance metric", choices = c("euclidean","manhattan"), selected = "euclidean")
                                )
                              )
                          )
@@ -396,38 +391,38 @@ body <- shinydashboard::dashboardBody(
     ),
     
     tabItem(tabName = "Correlation",  
-            box(title = "Correlation", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotlyOutput(outputId = "Correlation", height = FullHeight)
+            box(title = "Variable Correlation", solidHeader = TRUE, background = EDAColour, width = 12,
+                withSpinner(ui_element = plotlyOutput(outputId = "Correlation", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "Pairs",
             box(title = "Pairs", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "Pairs", height = FullHeight)
+                withSpinner(ui_element = plotOutput(outputId = "Pairs", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
-
+    
     
     tabItem(tabName = "DistPlot", 
             box(title = "Observation spread", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotOutput("KnnDistPlot", height = FullHeight)
+                withSpinner(ui_element = plotOutput("KnnDistPlot", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
-                   
+    
     tabItem(tabName = "Clusters",
             panel(
               box(title = "Clusters", solidHeader = TRUE, background = EDAColour, width = 12, collapsible = TRUE,
-                  withSpinner(
-                    plotOutput("ClusterPlot", height = FullHeight)
+                  withSpinner(ui_element = plotOutput("ClusterPlot", height = FullHeight),
+                              color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                   )
               ),
-              valueBoxOutput(outputId = "Clusters", width = 6),
+              valueBoxOutput(outputId = "ClusterCount", width = 6),
               valueBoxOutput(outputId = "Outliers", width = 6),
               box(title = "Cluster outliers", solidHeader = TRUE, background = EDAColour, width = 12, collapsible = TRUE, collapsed = TRUE,
                   verbatimTextOutput(outputId = "ClusterPrint")
@@ -437,52 +432,52 @@ body <- shinydashboard::dashboardBody(
     
     tabItem(tabName = "MissSummary", width = 12,
             panel(heading = "Summary",
-                infoBox(title = "Missing Observations", width = 4, color = EDAColour, fill = TRUE, icon = icon("align-justify"), textOutput(outputId = "MissObservations")),
-                infoBox(title = "Missing Variables", width = 4, color = EDAColour, fill = TRUE, icon = icon("columns"), textOutput(outputId = "MissVariables")),
-                infoBox(title = "Missing Values", width = 4, color = EDAColour, fill = TRUE, icon = icon("border-all"), textOutput(outputId = "MissValues")),
-                box(title = "Variables", solidHeader = TRUE, background = EDAColour, width = 6,
-                    sliderInput(inputId = "MissVarThreshold", label = "Missing variable threshold", min = 0, max = 100, step = 1, value = 50, post = "%", width = "100%")
-                ),
-                box(title = "Observations", solidHeader = TRUE, background = EDAColour, width = 6,
-                    sliderInput(inputId = "MissObsThreshold", label = "Missing observation threshold", min = 0, max = 100, step = 1, value = 50, post = "%", width = "100%")
-                ),
-                infoBox(title = "Heavily Missing Variables", width = 6, color = EDAColour, fill = TRUE, icon = icon("columns"), textOutput(outputId = "HeavyMissVar")),
-                infoBox(title = "Heavily Missing Observations", width = 6, color = EDAColour, fill = TRUE, icon = icon("align-justify"), textOutput(outputId = "HeavyMissObs"))
+                  infoBox(title = "Missing Observations", width = 4, color = EDAColour, fill = TRUE, icon = icon("align-justify"), textOutput(outputId = "MissObservations")),
+                  infoBox(title = "Missing Variables", width = 4, color = EDAColour, fill = TRUE, icon = icon("columns"), textOutput(outputId = "MissVariables")),
+                  infoBox(title = "Missing Values", width = 4, color = EDAColour, fill = TRUE, icon = icon("border-all"), textOutput(outputId = "MissValues")),
+                  box(title = "Variables", solidHeader = TRUE, background = EDAColour, width = 6,
+                      sliderInput(inputId = "MissVarThreshold", label = "Missing variable threshold", min = 0, max = 100, step = 1, value = 50, post = "%", width = "100%")
+                  ),
+                  box(title = "Observations", solidHeader = TRUE, background = EDAColour, width = 6,
+                      sliderInput(inputId = "MissObsThreshold", label = "Missing observation threshold", min = 0, max = 100, step = 1, value = 50, post = "%", width = "100%")
+                  ),
+                  infoBox(title = "Heavily Missing Variables", width = 6, color = EDAColour, fill = TRUE, icon = icon("columns"), textOutput(outputId = "HeavyMissVar")),
+                  infoBox(title = "Heavily Missing Observations", width = 6, color = EDAColour, fill = TRUE, icon = icon("align-justify"), textOutput(outputId = "HeavyMissObs"))
             )
     ),
     
-    tabItem(tabName = "MissCorrelation", width = 12,
+    tabItem(tabName = "MissCorrelation", 
             box(title = "Missingness correlation", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "MissCorr", height = FullHeight, width = FullHeight) # make square
+                withSpinner(ui_element = plotlyOutput(outputId = "MissCorr", height = FullHeight, width = FullHeight), # make square
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "MissPattern",
             box(title = "Missingness pattern", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "MissingChart2", height = FullHeight)
+                withSpinner(ui_element = plotOutput(outputId = "MissingChart2", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
-                     
+    
     tabItem(tabName = "MissExplain", width = 12,
             box(title = "Missingness explanation", solidHeader = TRUE, background = EDAColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "MissingnessInformationPlot", height = FullHeight)
+                withSpinner(ui_element = plotOutput(outputId = "MissingnessInformationPlot", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
-                     
+    
     tabItem(tabName = "MissVariables", width = 12,
-             box(title = "Missingness variables", solidHeader = TRUE, background = EDAColour, width = 12,
-                 withSpinner(
-                   plotlyOutput(outputId = "MissingnessVariables", height = FullHeight)
-                 )
-             )
+            box(title = "Missingness variables", solidHeader = TRUE, background = EDAColour, width = 12,
+                withSpinner(ui_element = plotlyOutput(outputId = "MissingnessVariables", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                )
+            )
     ),
-
+    
     tabItem(tabName = "TestCases",
             box(title = "Partitioning", solidHeader = TRUE, width = 6, background = SAMPColour, 
                 fluidRow(
@@ -510,7 +505,7 @@ body <- shinydashboard::dashboardBody(
                 fluidRow(
                   column(width = 6,
                          # hiding methods "oob" & "timeslice"
-                         selectInput(inputId = "Method", label = "Method", choices = c("boot", "boot632", "optimism_boot", "boot_all", "cv", "repeatedcv", "LOOCV", "adaptive_cv", "adaptive_boot", "LGOCV", "adaptive_LGOCV"), selected = "boot")
+                         selectizeInput(inputId = "Method", label = "Method", choices = c("boot", "boot632", "optimism_boot", "boot_all", "cv", "repeatedcv", "LOOCV", "adaptive_cv", "adaptive_boot", "LGOCV", "adaptive_LGOCV"), selected = "boot")
                   ),
                   column(width = 6, 
                          sliderInput(inputId = "Number", label = "Number of folds or iterations", min = 1, max = 30, step = 1, value = 10, ticks = FALSE),
@@ -520,12 +515,12 @@ body <- shinydashboard::dashboardBody(
             ),
             infoBoxOutput(outputId = "NearZeroVarTest", width = 8),
             box(title = "Resampling map", width = 12, collapsible = TRUE, background = SAMPColour, solidHeader = TRUE, 
-                withSpinner(
-                  plotlyOutput(outputId = "ResampleChart", height = FullHeight)
+                withSpinner(ui_element = plotlyOutput(outputId = "ResampleChart", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
-
+    
     tabItem(tabName = "ProcessingSteps",
             box(title = tagList("Processing Steps", actionButton(inputId = "Restart", label = "Restart", icon = icon("repeat"))),
                 width = 12,
@@ -538,19 +533,19 @@ body <- shinydashboard::dashboardBody(
                         checkboxInput(inputId = "MissingObs", label = "Remove heavily missing observations?", value = FALSE),
                         checkboxInput(inputId = "Unknown", label = "Assign missing nominal levels to Unknown?", value = FALSE),
                         checkboxInput(inputId = "Shadow", label = "Add shadow variables?", value = FALSE),
-                        selectInput(inputId = "Impute", label = "Missing value processing?", choices = missChoices, selected = "none")
+                        selectizeInput(inputId = "Impute", label = "Missing value processing?", choices = missChoices, selected = "none")
                     )
                   ),
                   column(
                     width = 3,
                     box(title = "Non-numeric", width = 12, solidHeader = TRUE, background = PROCColour, collapsible = TRUE,
-                        selectInput(inputId = "Balance", label = "Balance outcome processing?", choices = c("None" = "none", "Up" = "up", "Down" = "down", "Up-Down" = "up-down"), selected = "none"),
+                        selectizeInput(inputId = "Balance", label = "Balance outcome processing?", choices = c("None" = "none", "Up" = "up", "Down" = "down", "Up-Down" = "up-down"), selected = "none"),
                         checkboxInput(inputId = "text", label = "Expand text into text features?", value = FALSE),
-                        selectInput(inputId = "String", label = "High Cardinality processing?", 
+                        selectizeInput(inputId = "String", label = "High Cardinality processing?", 
                                     choices = c("None" = "none", "Omit" = "omit", "Weight-of-evidence encoding" = "woe", "Mean encoding" = "mean", "Hash encoding" = "hash", "Embedded encoding" = "embed", "Binary encoding" = "binary"),
                                     selected = "none"),
                         checkboxInput(inputId = "Other", label = "Pool rare levels?", value = FALSE),
-                        selectInput(inputId = "DateFeatures", label = "Expand dates into features", multiple = TRUE, 
+                        selectizeInput(inputId = "DateFeatures", label = "Expand dates into features", multiple = TRUE, 
                                     choices = c("day of week" = "dow", "day of year" = "doy", "week" = "week", "month" = "month", "decimal", "quarter" = "quarter", "semester", "year"),
                                     selected = c()),
                         checkboxInput(inputId = "Cyclic", label = "Treat dow, month as cyclic?", value = FALSE),
@@ -563,7 +558,7 @@ body <- shinydashboard::dashboardBody(
                         checkboxInput(inputId = "YJ", label = "Reshape numeric distributions?", value = FALSE),
                         checkboxInput(inputId = "Center", label = "Apply mean centering?", value = FALSE),
                         checkboxInput(inputId = "Scale", label = "Apply SD scaling?", value = FALSE),
-                        selectInput(inputId = "DimReduce", label = "Dimensionally reduce?", choices = c("None" = "none", "Correlation" = "corr", "PCA" = "pca", "ICA" = "ica", "IsoMap" = "isomap", "PLS (sup)" = "pls", "UMAP (sup)" = "umap", "kPLS" = "kpls"), selected = "none"),
+                        selectizeInput(inputId = "DimReduce", label = "Dimensionally reduce?", choices = c("None" = "none", "Correlation" = "corr", "PCA" = "pca", "ICA" = "ica", "IsoMap" = "isomap", "PLS (sup)" = "pls", "UMAP (sup)" = "umap", "kPLS" = "kpls"), selected = "none"),
                         checkboxInput(inputId = "Poly", label = "Apply polynomial expansion?", value = FALSE)
                     )
                   ),
@@ -573,7 +568,7 @@ body <- shinydashboard::dashboardBody(
                         checkboxInput(inputId = "Clusters", label = "Add clusters?", value = FALSE), 
                         checkboxInput(inputId = "Centers", label = "Add Distances to class centers?", value = FALSE),
                         checkboxInput(inputId = "FeatureSelection", label = "Apply Feature Selection?", value = FALSE),
-                        selectInput(inputId = "Variance", label = "Variance processing?", choices = c("None" = "none", "Zero Variance" = "zv", "Near-zero variance" = "nzv"), selected = "none"),
+                        selectizeInput(inputId = "Variance", label = "Variance processing?", choices = c("None" = "none", "Zero Variance" = "zv", "Near-zero variance" = "nzv"), selected = "none"),
                         checkboxInput(inputId = "LinComb", label = "Remove variables to make linearly independent?", value = FALSE)
                     )
                   )
@@ -597,19 +592,19 @@ body <- shinydashboard::dashboardBody(
                 verbatimTextOutput(outputId = "PreProcSummary")
             )
     ),
-
+    
     tabItem(tabName = "ProcessingSummary",
             box(title = "Processed Data Summary", solidHeader = TRUE, collapsible = TRUE, width = 12, background = PROCColour, 
-                withSpinner(
-                  htmlOutput(outputId = "ProcessedDataSummary", style = "color:black")
+                withSpinner(ui_element = htmlOutput(outputId = "ProcessedDataSummary", style = "color:black"),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "ProcessingTable",
             box(title = "Processed Train-Data Table", solidHeader = TRUE, collapsible = FALSE, width = 12, background = PROCColour,
-                withSpinner(
-                  DT::dataTableOutput("PreProcTable")
+                withSpinner(ui_element = DT::dataTableOutput("PreProcTable"), 
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
@@ -625,23 +620,23 @@ body <- shinydashboard::dashboardBody(
                       radioButtons(inputId = "ProbType", label = "Problem Type:",  choices = c("Any", "Classification","Regression"), selected = "Any", inline = TRUE),
                       radioButtons(inputId = "PredictorsTag", label = "Special predictors", choices = c("All Nominal", "All Binary", "Mixture"), selected = "Mixture", inline = TRUE),
                       column(width = 6,
-                        checkboxInput(inputId = "TwoClassTag", label = "Two class outcome?", value = TRUE),
-                        checkboxInput(inputId = "WeightingTag", label = "Weightings present?", value = FALSE),
-                        checkboxInput(inputId = "OutliersTag", label = "Outliers still present?", value = FALSE),
-                        checkboxInput(inputId = "MissingTag", label = "Missing data still present?", value = FALSE)
+                             checkboxInput(inputId = "TwoClassTag", label = "Two class outcome?", value = TRUE),
+                             checkboxInput(inputId = "WeightingTag", label = "Weightings present?", value = FALSE),
+                             checkboxInput(inputId = "OutliersTag", label = "Outliers still present?", value = FALSE),
+                             checkboxInput(inputId = "MissingTag", label = "Missing data still present?", value = FALSE)
                       ),
                       column(width = 6,
-                        checkboxInput(inputId = "ProbabilityTag", label = "Class probabilities required?", value = FALSE),
-                        checkboxInput(inputId = "NominalsTag", label = "Nominal data still present?", value = FALSE),
-                        checkboxInput(inputId = "NZVTag", label = "Near-Zero Variance still present?", value = FALSE),
-                        checkboxInput(inputId = "LinCombTag", label = "Linear Combinations still present?", value = FALSE),
-                        checkboxInput(inputId = "RatioTag", label = "Excessive variables cf observations?", value = FALSE)
+                             checkboxInput(inputId = "ProbabilityTag", label = "Class probabilities required?", value = FALSE),
+                             checkboxInput(inputId = "NominalsTag", label = "Nominal data still present?", value = FALSE),
+                             checkboxInput(inputId = "NZVTag", label = "Near-Zero Variance still present?", value = FALSE),
+                             checkboxInput(inputId = "LinCombTag", label = "Linear Combinations still present?", value = FALSE),
+                             checkboxInput(inputId = "RatioTag", label = "Excessive variables cf observations?", value = FALSE)
                       )
                     )
                 ),
                 box(title = "Subjective criteria", width = 3, background = METHColour,
-                    selectInput(inputId = "IncFeatures", label = "Essential characteristics", choices = c(), multiple = TRUE, selected = NULL),
-                    selectInput(inputId = "ExcFeatures", label = "Excluded characteristics", choices = c(), multiple = TRUE, selected = NULL)
+                    selectizeInput(inputId = "IncFeatures", label = "Essential characteristics", choices = c(), multiple = TRUE, selected = NULL),
+                    selectizeInput(inputId = "ExcFeatures", label = "Excluded characteristics", choices = c(), multiple = TRUE, selected = NULL)
                 )
             ),
             infoBoxOutput(outputId = "Methods")
@@ -649,8 +644,8 @@ body <- shinydashboard::dashboardBody(
     
     tabItem(tabName = "MethodSimilarity",
             box(title = "Map of methods that meet the criteria", width = 12, background = METHColour, solidHeader = TRUE,
-                withSpinner(
-                  plotOutput(outputId = "D2plot", height = "600px", hover = "MapHover", dblclick = "MapDblClick")
+                withSpinner(ui_element = plotOutput(outputId = "D2plot", height = "600px", hover = "MapHover", dblclick = "MapDblClick"),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 ),
                 uiOutput("MapInfo"),
                 box(title = "", width = 11, background = METHColour, solidHeader = TRUE, 
@@ -689,85 +684,85 @@ body <- shinydashboard::dashboardBody(
                      box(title = "Select a model", background = TRAINColour, width = 12,
                          radioButtons(inputId = "ResultsFor", label = "", choices = "", selected = ""),
                          actionButton(inputId = "UndoModel", label = "Untrain", icon = icon("undo-alt"), width = "100px")
-                     ),
+                     )
               ),
               column(width = 10,
                      box(title = "Optimisation", width = 12, background = TRAINColour, collapsible = TRUE,
                          fluidRow(
-                           column(width = 3, selectInput(inputId = "HypMetric", label = "Performance metric", regChoices, selected = "RMSE", width = "140px")),
-                           column(width = 3, selectInput(inputId = "SelectionFunc", label = "Optimum selection", choices = selectionChoices, selected = selectionChoices[1], width = "140px")),
-                           column(width = 3, selectInput(inputId = "Search", label = "Search type", choices = searchChoices, selected = searchChoices[1], width = "140px")),
+                           column(width = 3, selectizeInput(inputId = "HypMetric", label = "Performance metric", regChoices, selected = "RMSE", width = "140px")),
+                           column(width = 3, selectizeInput(inputId = "SelectionFunc", label = "Optimum selection", choices = selectionChoices, selected = selectionChoices[1], width = "140px")),
+                           column(width = 3, selectizeInput(inputId = "Search", label = "Search type", choices = searchChoices, selected = searchChoices[1], width = "140px")),
                            column(width = 3, sliderInput(inputId = "TuneLength", label = "Tune attempts", min = 1, max = 15, step = 1, value = 4, ticks = FALSE, width = "140px"))
                          )
                      ),
                      shinydashboard::tabBox(
-                           id = "TrainTab",
-                           side = "left",
-                           width = 12,
-                           tabPanel(title = "Summary", 
-                                    icon = icon("file"),
-                                    panel(
-                                      box(title = "Errors and Warnings", width = 12, verbatimTextOutput(outputId = "TrainWarn"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
-                                      box(title = "Resampled performance", width = 12, div(style = 'overflow-x: auto', tableOutput(outputId = "Resamples")), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
-                                      box(title = "Optimum hyper-parameters", width = 6, tableOutput(outputId = "Hyperparams"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
-                                      box(title = "Method characteristics", width = 6, tableOutput(outputId = "Characteristics"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
-                                    )
-                           ),
-                           tabPanel(title = "Fit", 
-                                    icon = icon("tachometer-alt"),
-                                    panel(
-                                      box(title = "Model performance", width = 6, solidHeader = TRUE, background = TRAINColour,
-                                          withSpinner(
-                                            plotOutput(outputId = "ModelTrainPlot", height = "400px")
-                                          )
-                                      ),
-                                      box(id = "ROCPlot", title = "Response Operating Characteristics", width = 6, solidHeader = TRUE, background = TRAINColour,
-                                          withSpinner(
-                                            plotOutput(outputId = "RocCurvePlot", height = "400px")
-                                          )
-                                      ),
-                                      box(title = "Classification Statistics",  width = 6, verbatimTextOutput(outputId = "ClassStats"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
-                                    )
-                           ),
-                           tabPanel(title = "Tuning",
-                                    icon = icon("chart-line"),
-                                    withSpinner(
-                                      plotOutput(outputId = "Optimize", height = "400px")
-                                    )
-                           ),
-                           tabPanel(
-                             title = "Recipe",
-                             icon = icon("book-open"),
-                             panel(
-                               box(title = "Recipe Definition", width = 12, verbatimTextOutput(outputId = "TrainedRecipe"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
-                               box(title = "Variable Roles", width = 12, tableOutput(outputId = "RecipeSummary"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
-                             )
-                           ),
-                           # tabPanel(
-                           #   title = "Breakdown",
-                           #   icon = icon("columns"),
-                           #   withSpinner(
-                           #     plotOutput(outputId = "Breakdown", height = "400px")
-                           #   ),
-                           # ),
-                           tabPanel(
-                             title = "Variables",
-                             icon = icon("columns"),
-                             panel(
-                               box(title = "Importance", solidHeader = TRUE, background = TRAINColour, collapsible = TRUE, width = 12,
-                                   plotOutput(outputId = "VarImp", height = "400px")
-                               ),
-                               box(title = "Coefficents", width = 12, verbatimTextOutput(outputId = "ModelCoef"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
-                             )
-                           ),
-                           tabPanel(
-                             title = "Log",
-                             icon = icon("quote-left"),
-                             panel(
-                               box(title = "Output", width = 12, verbatimTextOutput(outputId = "TrainLog"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
-                             )
-                           )
+                       id = "TrainTab",
+                       side = "left",
+                       width = 12,
+                       tabPanel(title = "Summary", 
+                                icon = icon("file"),
+                                panel(
+                                  box(title = "Errors and Warnings", width = 12, verbatimTextOutput(outputId = "TrainWarn"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
+                                  box(title = "Resampled performance", width = 12, div(style = 'overflow-x: auto', tableOutput(outputId = "Resamples")), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
+                                  box(title = "Optimum hyper-parameters", width = 6, tableOutput(outputId = "Hyperparams"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
+                                  box(title = "Method characteristics", width = 6, tableOutput(outputId = "Characteristics"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
+                                )
+                       ),
+                       tabPanel(title = "Fit", 
+                                icon = icon("tachometer-alt"),
+                                panel(
+                                  box(title = "Model performance", width = 6, solidHeader = TRUE, background = TRAINColour,
+                                      withSpinner(ui_element = plotOutput(outputId = "ModelTrainPlot", height = "400px"),
+                                                  color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                                      )
+                                  ),
+                                  box(id = "ROCPlot", title = "Response Operating Characteristics", width = 6, solidHeader = TRUE, background = TRAINColour,
+                                      withSpinner(ui_element = plotOutput(outputId = "RocCurvePlot", height = "400px"),
+                                                  color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                                      )
+                                  ),
+                                  box(title = "Classification Statistics",  width = 6, verbatimTextOutput(outputId = "ClassStats"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
+                                )
+                       ),
+                       tabPanel(title = "Tuning",
+                                icon = icon("chart-line"),
+                                withSpinner(ui_element = plotOutput(outputId = "Optimize", height = "400px"),
+                                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
+                                )
+                       ),
+                       tabPanel(
+                         title = "Recipe",
+                         icon = icon("book-open"),
+                         panel(
+                           box(title = "Recipe Definition", width = 12, verbatimTextOutput(outputId = "TrainedRecipe"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE),
+                           box(title = "Variable Roles", width = 12, tableOutput(outputId = "RecipeSummary"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
                          )
+                       ),
+                       # tabPanel(
+                       #   title = "Breakdown",
+                       #   icon = icon("columns"),
+                       #   withSpinner(color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE,
+                       #     plotOutput(outputId = "Breakdown", height = "400px")
+                       #   ),
+                       # ),
+                       tabPanel(
+                         title = "Variables",
+                         icon = icon("columns"),
+                         panel(
+                           box(title = "Importance", solidHeader = TRUE, background = TRAINColour, collapsible = TRUE, width = 12,
+                               plotOutput(outputId = "VarImp", height = "400px")
+                           ),
+                           box(title = "Coefficents", width = 12, verbatimTextOutput(outputId = "ModelCoef"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
+                         )
+                       ),
+                       tabPanel(
+                         title = "Log",
+                         icon = icon("quote-left"),
+                         panel(
+                           box(title = "Output", width = 12, verbatimTextOutput(outputId = "TrainLog"), solidHeader = TRUE, background = TRAINColour, collapsible = TRUE)
+                         )
+                       )
+                     )
                      #)
               )
             )
@@ -775,24 +770,24 @@ body <- shinydashboard::dashboardBody(
     
     tabItem(tabName = "ModelMetrics",
             box(title = "Model Metrics", icon = icon("tachometer-alt"), solidHeader = TRUE, background = MODELSColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "Selection", height = FullHeight)
+                withSpinner(ui_element = plotOutput(outputId = "Selection", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
-            ),
+            )
     ),
     
     tabItem(tabName = "ModelCorrelation",
             box(title = "Model Correlation", icon = icon("th"), solidHeader = TRUE, background = MODELSColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "ResidualCorr", height = FullHeight)
+                withSpinner(ui_element = plotOutput(outputId = "ResidualCorr", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
-            ),
+            )
     ),
     
     tabItem(tabName = "ModelHierarchy", 
             box(title = "Model Hierarchy", icon = icon("sitemap"), solidHeader = TRUE, background = MODELSColour, width = 12, 
-                withSpinner(
-                  plotOutput(outputId = "ModelTree", height = FullHeight)
+                withSpinner(ui_element = plotOutput(outputId = "ModelTree", height = FullHeight),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
@@ -810,12 +805,12 @@ body <- shinydashboard::dashboardBody(
                 )
             )
     ),
-
+    
     tabItem(tabName = "GradFit1", title = "Fit", icon = icon("heartbeat"),
             panel(
               box(title = "Projected Model performance on unseen data", solidHeader = TRUE, background = GRADColour, width = 12, collapsible = TRUE,
-                  withSpinner(
-                    plotOutput(outputId = "GradModelPlot1", height = "400px")
+                  withSpinner(ui_element = plotOutput(outputId = "GradModelPlot1", height = "400px"),
+                              color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                   )
               ),
               box(title = "Statistics", solidHeader = TRUE, background = GRADColour, width = 12, collapsible = TRUE,
@@ -842,24 +837,24 @@ body <- shinydashboard::dashboardBody(
     ),
     tabItem(tabName = "GradFit2", title = "Fit", icon = icon("heartbeat"),
             box(title = "Finalised Model Fit", solidHeader = TRUE, background = GRADColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "GradModelPlot2", height = "400px")
+                withSpinner(ui_element = plotOutput(outputId = "GradModelPlot2", height = "400px"),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 ),
                 verbatimTextOutput(outputId = "Performance2")
             )
     ),
     tabItem(tabName = "GradParameters", icon = icon("chart-line"),
             box(title = "Finalised Hyperparameters", solidHeader = TRUE, background = GRADColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "GradOptimize", height = "400px")
+                withSpinner(ui_element = plotOutput(outputId = "GradOptimize", height = "400px"),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),
     
     tabItem(tabName = "GradResiduals", icon = icon("chart-area"),
             box(title = "Finalised Residuals", solidHeader = TRUE, background = GRADColour, width = 12,
-                withSpinner(
-                  plotOutput(outputId = "GradResiduals", height = "400px")
+                withSpinner(ui_element = plotOutput(outputId = "GradResiduals", height = "400px"),
+                            color = SPINNER_COLOUR, type = SPINNER_TYPE, size = SPINNER_SIZE
                 )
             )
     ),

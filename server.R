@@ -25,63 +25,139 @@ shinyServer(function(input, output, session) {
 
   # on session ended ------------------------------------------------------
   onSessionEnded(fun = function() {
-    print("Cleaning up")
-    rm(list = ls(all.names = TRUE))
-    gc()
-    stopApp()
+    print("Session ended")
+    # rm(list = ls(all.names = TRUE))
+    # gc()
   })
 
-  # observe event Project ------------------------------------------------------ 
-  observeEvent(input$Project, {
-    req(input$Project != "")
-    FileName <- paste0(input$Project, ".RDA")
-    if (file.exists(FileName)) {
-      print("NOT Loading previous session")
-    #   INPUT <- NULL
-    #   load(file = FileName)
-    #   if (INPUT$DataSource != input$DataSource) {
-    #     updateTabItems(session = session, inputId = "DataSource", selected = INPUT$DataSource)
-    #   }
-    #   if (INPUT$Package != input$Package) {
-    #     updateSelectInput(session = session, inputId = "Package", selected = INPUT$Package)
-    #   }
-    #   if (INPUT$DataSet != input$DataSet) {
-    #     updateSelectInput(session = session, inputId = "DataSet", selected = INPUT$DataSet)
-    #   }
-    # 
-    #   if (input$Target != input$Target) {
-    #     updateSelectInput(session = session, inputId = "Target", selected = input$Target)
-    #   }
-    #   if (INPUT$AddWeights != input$AddWeights) {
-    #     updateSelectInput(session = session, inputId = "AddWeights", selected = INPUT$AddWeights)
-    #   } else if (INPUT$Weights != input$Weights) {
-    #     updateSelectInput(session = session, inputId = "Weights", selected = INPUT$Weights)
-    #   }
-    #   if (INPUT$AddIds != input$AddIds) {
-    #     updateSelectInput(session = session, inputId = "AddIds", selected = INPUT$AddIds)
-    #   } else if (INPUT$ID != input$ID) {
-    #     updateSelectInput(session = session, inputId = "ID", selected = INPUT$ID)
-    #   }
-    }
+  # reactive function getProjects ----------------------------------------------
+  getProjects <- reactive({
+    files <- file.info(list.files(PROJECT_FOLDER, full.names = TRUE), extra_cols = FALSE)
+    key <- !files$isdir & str_ends(rownames(files), ".RDA")
+    proj <- rownames(files)[key]
+    proj <- sub(pattern = paste0("^", PROJECT_FOLDER, .Platform$file.sep), replacement = "", x = proj)
+    sub(pattern = "\\.RDA$", replacement = "", x = proj)
   })
-
+  
+  
   # observe event Save ------------------------------------------------------
   observeEvent(input$Save, {
     req(input$Project != "")
     print("Saving state")
-    FileName <- paste0(input$Project, ".RDA")
+    if (!dir.exists(PROJECT_FOLDER)) {
+      dir.create(PROJECT_FOLDER)
+    }
+    FileName <- paste0(PROJECT_FOLDER, .Platform$file.sep, input$Project, ".RDA")
     INPUT <- shiny::reactiveValuesToList(input)
     REACT <- shiny::reactiveValuesToList(react)
     save(list = c("INPUT", "REACT"), file = FileName)
-    print(INPUT)
-    print(REACT)
   })
+  
+  # Reactive Poll loadProject ----------------------------------------------------
+  loadProject <- reactive({
+      input$Save
+      f <- paste0(PROJECT_FOLDER, .Platform$file.sep, isolate(input$Project), ".RDA")
+      cat("Project file", f, "read\n")
+      load(f, envir = .GlobalEnv)
+    }
+  )
+
+  # observe event LoadProject ------------------------------------------------------ 
+  observe({
+    input$LoadProjectReq
+    req(isolate(input$Project != ""))
+    shinyjs::disable(id = "LoadProjectReq")
+    loadProject()
+    changed <- 0
+    for (id in names(INPUT)) {
+      VAR <- isolate(input[[id]])
+      if (!equals(VAR, INPUT[[id]])) {
+        # Avoid processing buttons of all kinds (Action & bsButton)
+        if (id %in% c("help", "Save", "Next", "LoadProjectReq", "Evaluate", "Restart", 
+                      "RefreshModels", "Suggest", "ChooseAll", "Install", "Reset", "Train", 
+                      "Pause", "UndoModel", "AddModel", "GradTrain")) {
+          
+          # Avoid processing file inputs of any kind 
+        } else if (id %in% c("LocalFile", "ServerFile")) {
+          # do nothing
+          # Avoid processing the non-tab menus
+        } else if (id %in% c("Submenu", "Submenu_state", "sidebarItemExpanded")) {
+          # Special processing for Plotly events
+        } else if (grepl(pattern = "^plotly_.*", x = id)) {
+          # do nothing
+          # Special processing for DT::Table events
+        } else if (grepl(pattern = ".*_(rows_|cells_|search|row_last_).*", x = id)) {
+          table <- gsub(pattern = "_(rows_|cells_|search).*", replacement = "", x = id)
+          if (stringr::str_ends(string = id, pattern = "_rows_selected")) {
+            DTproxy <- DT::dataTableProxy(table)
+            print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+            DT::selectRows(proxy = DTproxy, selected = INPUT[[id]], ignore.selectable = TRUE)
+            #changed <- changed + 1  # As this does not reflect in Table_rows_selected it must be trusted to have occurred
+          } else if (stringr::str_ends(string = id, pattern = "_search")) {
+            DTproxy <- DT::dataTableProxy(table)
+            print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+            DT::updateSearch(proxy = DTproxy, keywords = list(global = INPUT[[id]], columns = NULL))
+            #changed <- changed + 1  # As this does not reflect in Table_search it must be trusted to have occurred
+          }
+        } else if (is.numeric(VAR) | is.numeric(INPUT[[id]])) {
+          print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+          updateSliderInput(session = session, inputId = id, value = INPUT[[id]])
+          changed <- changed + 1
+        } else if (is.logical(VAR) | is.logical(INPUT[[id]])) {
+          print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+          updateCheckboxInput(session = session, inputId = id, value = INPUT[[id]])
+          changed <- changed + 1
+        } else if (id %in% c("Sep", "Quote", "Decimal", "ProbType", "PredictorsTag", "ResultsFor", "SelectedModel")) {
+          print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+          updateRadioButtons(session = session, inputId = id, selected = INPUT[[id]])
+          changed <- changed + 1
+        } else if (id %in% c("URL", "DateFormat")) {
+          print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+          updateTextInput(session = session, inputId = id, value = INPUT[[id]])
+          changed <- changed + 1
+        } else if (id %in% c("DataSource", "Navbar", "TrainTab")) {
+          print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+          updateTabItems(session = session, inputId = id, selected = INPUT[[id]])
+          changed <- changed + 1
+        } else if (id %in% c()) {
+          print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+          updateTabItems(session = session, inputId = id, selected = INPUT[[id]])
+          changed <- changed + 1
+        } else if (is.character(VAR) | is.character(INPUT[[id]])) {
+          print(paste("Updating", id, "from", VAR, "to", INPUT[[id]]))
+          updateSelectizeInput(session = session, inputId = id, selected = INPUT[[id]])  #Assume no selectInput()
+          changed <- changed + 1
+        }
+      }
+    }
+    
+    for (id in names(REACT)) {
+      VAR <- isolate(react[[id]])
+      if (!equals(VAR, REACT[[id]])) {
+        print(paste0("Updating react$", id))
+        react[[id]] <- REACT[[id]]
+      }
+    }
+    
+    # ResultsFor update is masked behind a button
+    if (length(react$ModelSet) > 0) {
+      updateRadioButtons(session = session, inputId = "ResultsFor", choices = names(react$ModelSet), selected = INPUT$ResultsFor)
+    }
+    
+    if (changed > 0) {
+      print(paste("Changed =", changed))
+      invalidateLater(millis = 2000, session = session)
+    } else {
+      showNotification(ui = "Project-load completed", duration = 5, type = "message")
+      shinyjs::enable(id = "LoadProjectReq")
+    }
+  }, priority = -10)
   
   # observe event Package ------------------------------------------------------
   observeEvent(input$Package, {
     results <- data(package = input$Package)$results
     if (nrow(results) == 0 || ncol(results) != 4) {
-      updateSelectInput(session = session, inputId = "DataSet", choices = "", selected = "")
+      updateSelectizeInput(session = session, inputId = "DataSet", choices = "", selected = "")
     } else {
       choices <- try({
         results <- data.frame(results, stringsAsFactors = FALSE)
@@ -92,9 +168,9 @@ shinyServer(function(input, output, session) {
         choices
       }, silent = TRUE)
       if (length(choices) == 0) {
-        updateSelectInput(session = session, inputId = "DataSet", choices = "", selected = "")
+        updateSelectizeInput(session = session, inputId = "DataSet", choices = "")
       } else {
-        updateSelectInput(session = session, inputId = "DataSet", choices = as.list(choices), selected = as.list(choices[1]))
+        updateSelectizeInput(session = session, inputId = "DataSet", choices = as.list(choices))
       }
     }
   })
@@ -119,7 +195,7 @@ shinyServer(function(input, output, session) {
             #create alert to resolve VarName 
             choices <- what[base::apply(X = what, FUN = is.data.frame)]
             showElement(id = "VarName")
-            #   updateSelectInput(session = session, inputId = "VarName", choices = choices)
+            #   updateSelectizeInput(session = session, inputId = "VarName", choices = choices)
             get(input$VarName, envir = loaded)
           } else {
             hideElement(id = "VarName")
@@ -165,33 +241,51 @@ shinyServer(function(input, output, session) {
   })
   getContinuousDebounced <- debounce(Continuous, millis = 1000)
   
+  observeEvent(input$ServerFile, {
+    file <- parseFilePaths(roots, input$ServerFile)[1,"datapath", drop = TRUE]
+    req(file)
+    updateTextInput(session = session, inputId = "ServerFileName", value = as.character(file))
+  })
+  
+  observeEvent(input$LocalFile, {
+    file <- input$LocalFile[1,"datapath", drop = TRUE]
+    req(file)
+    updateTextInput(session = session, inputId = "LocalFileName", value = as.character(file))
+  })
+  
+  observe({
+    req(input$Project == "")
+    updateSelectizeInput(session = session, inputId = "Project", choices = getProjects(), selected = input$Project)
+  })
+  
   # reactive function getRawData ------------------------------------------------------
   getRawData <- reactive({
     req(input$DataSource)
     if (input$DataSource == "Server Data File") {
-      req(!is(input$ServerFile, "shinyActionButtonValue"))
-      sfile <- shinyFiles::parseFilePaths(roots, input$ServerFile)
-      react$File <- sfile$datapath
-      updateTextInput(session = session, inputId = "Project", value = sfile$name)
+      req(input$ServerFileName != "")
+      react$File <- input$ServerFileName
       d <- LoadFileType()
-      
+      name <- gsub(pattern = ".*(/|\\\\)", replacement = "", x = input$ServerFileName)
+      updateSelectizeInput(session = session, inputId = "Project", choices = c(name, isolate(getProjects())), selected = name)
+
     } else if (input$DataSource == "Local Data File") {
-      req(input$LocalFile)
-      react$File <- input$LocalFile$datapath
-      updateTextInput(session = session, inputId = "Project", value = input$LocalFile$name)
+      req(input$LocalFileName != "")
+      react$File <- input$LocalFileName
       d <- LoadFileType()
-      
+      name <- gsub(pattern = ".*(/|\\\\)", replacement = "", x = input$LocalFileName)
+      updateSelectizeInput(session = session, inputId = "Project", choices = c(name, isolate(getProjects())), selected = name)
+
     } else if (input$DataSource == "Remote Data Resource") {
       req(input$URL)
       URL <- input$URL
       react$File <- URL
-      updateTextInput(session = session, inputId = "Project", value = URL)
+      updateSelectizeInput(session = session, inputId = "Project", choices = c(URL, isolate(getProjects())), selected = URL)
       d <- LoadFileType()
       
     } else if (input$DataSource == "Package Dataset") {
       req(input$Package != "", input$DataSet != "")
       name <- paste(sep = "::", input$Package, input$DataSet)
-      updateTextInput(session = session, inputId = "Project", value = name)
+      updateSelectizeInput(session = session, inputId = "Project", choices = c(name, isolate(getProjects())), selected = name)
       d <- loadR()
     }
     req(d, nrow(d) > 0, ncol(d) > 0)
@@ -242,14 +336,14 @@ shinyServer(function(input, output, session) {
                rev(choices) 
     )
     guess <- best[1]
-    updateSelectInput(session = session, inputId = "Target", choices = as.list(choices), selected = as.list(guess))
-    updateSelectInput(session = session, inputId = "Weights", selected = "")
-    updateSelectInput(session = session, inputId = "PreSplit", selected = "")
+    updateSelectizeInput(session = session, inputId = "Target", choices = as.list(choices), selected = as.list(guess))
+    updateSelectizeInput(session = session, inputId = "Weights", selected = "")
+    updateSelectizeInput(session = session, inputId = "PreSplit", selected = "")
     updateSelectizeInput(session = session, inputId = "ID", selected = list())
-    updateSelectInput(session = session, inputId = "HideCol", selected = list())
-    updateSelectInput(session = session, inputId = "Group", selected = NULL)
+    updateSelectizeInput(session = session, inputId = "HideCol", selected = list())
+    updateSelectizeInput(session = session, inputId = "Group", selected = NULL)
     updateCheckboxInput(session = session, inputId = "AddWeights", value = FALSE)
-    updateSelectInput(session = session, inputId = "BalanceFactors", selected = NULL)
+    updateSelectizeInput(session = session, inputId = "BalanceFactors", selected = NULL)
     d
   })
   
@@ -412,7 +506,7 @@ shinyServer(function(input, output, session) {
     choices <- colnames(d)
     names(choices) <- paste0(choices, " [", ds$type, "]")
     #set appropriate choices
-    updateSelectInput(session = session, inputId = "HideCol", choices = as.list(choices))
+    updateSelectizeInput(session = session, inputId = "HideCol", choices = as.list(choices))
   })
 
   # reactive getDataSummary ------------------------------------------------------
@@ -435,7 +529,7 @@ shinyServer(function(input, output, session) {
   #   {
   #     #set a default value for input$ID and appropriate choices
   #     if (input$AddIds) {
-  #       updateSelectInput(session = session, inputId = "ID", choices = c("RowName"), selected = "RowName")
+  #       updateSelectizeInput(session = session, inputId = "ID", choices = c("RowName"), selected = "RowName")
   #       shinyjs::disable(id = "ID")
   #     } else {
   #       existID <- input$ID
@@ -443,7 +537,7 @@ shinyServer(function(input, output, session) {
   #       if (!all(existID %in% choicesID)) {
   #         existID <- NULL
   #       }
-  #       updateSelectInput(session = session, inputId = "ID", choices = choicesID, selected = existID)
+  #       updateSelectizeInput(session = session, inputId = "ID", choices = choicesID, selected = existID)
   #       shinyjs::enable(id = "ID")
   #     }
   #   }
@@ -457,14 +551,13 @@ shinyServer(function(input, output, session) {
       names(choices) <- paste0(choices, " [",ds$type,"]")
       imbalanced <- choices[ds$imbalanceRatio > 1.1]
       imbalanced[is.na(imbalanced)] <- FALSE
-      ######shinyjs::toggleElement(id = "AddWeights", condition = input$ProbType == "Classification" && input$Target %in% imbalanced)
       if (input$AddWeights && length(input$BalanceFactors) > 0) {
-        updateSelectInput(session = session, inputId = "Weights", choices = list("Weighting"), selected = "Weighting")
+        updateSelectizeInput(session = session, inputId = "Weights", choices = list("Weighting"), selected = "Weighting")
         shinyjs::disable(id = "Weights")
       } else {
         wChoices <- choices[ds$numeric & !ds$binary]
         wChoices[["none"]] <- ""
-        updateSelectInput(session = session, inputId = "Weights", choices = wChoices, selected = isolate(input$Weights))
+        updateSelectizeInput(session = session, inputId = "Weights", choices = wChoices, selected = isolate(input$Weights))
         shinyjs::enable(id = "Weights")
       }
       if (input$PreSplit != "") {
@@ -476,16 +569,13 @@ shinyServer(function(input, output, session) {
         updateSelectizeInput(session = session, inputId = "Groups", choices = gChoices, selected = isolate(input$Groups))
         shinyjs::enable(id = "Groups")
       }
-      if (input$AddWeights) {
-        lowCard <- setdiff(choices[ds$uniqueness <= input$Continuous[1] & ds$uniqueness > 1], c(input$PreSplit, input$Groups))
-        updateSelectInput(session = session, inputId = "BalanceFactors", choices = lowCard, selected = isolate(input$BalanceFactors))
-        shinyjs::showElement(id = "BalanceFactors")
-      } else {
-        shinyjs::hideElement(id = "BalanceFactors")
-      }
+      lowCard <- setdiff(choices[ds$uniqueness <= input$Continuous[1] & ds$uniqueness > 1], c(input$PreSplit, input$Groups))
+      updateSelectizeInput(session = session, inputId = "BalanceFactors", choices = lowCard, selected = isolate(input$BalanceFactors))
+      shinyjs::toggle(id = "BalanceFactors", condition = input$AddWeights)
+
       pChoices <- choices[ds$binary | (ds$factor & ds$uniqueness == 2)]
       pChoices[["none"]] <- ""
-      updateSelectInput(session = session, inputId = "PreSplit", choices = pChoices, selected = isolate(input$PreSplit))
+      updateSelectizeInput(session = session, inputId = "PreSplit", choices = pChoices, selected = isolate(input$PreSplit))
       ids <- getIDChoices()
       if (length(ids) == 0) {
         # updateCheckboxInput(session = session, inputId = "AddIds", value = TRUE)  #triggers before length(ids) has settled down
@@ -733,7 +823,7 @@ shinyServer(function(input, output, session) {
   })
 
   ###########################################################################
-  output$Ratio <- renderInfoBox({
+  output$RatioObs <- renderInfoBox({
     d <- getSomePredictorData()
     count <- length(colnames(d)) - ifelse(isRoleValid(input$Target, d), 1, 0)
     rows <- nrow(getData())
@@ -815,30 +905,6 @@ shinyServer(function(input, output, session) {
                        silent = TRUE
     )
   })
-
-  ###########################################################################
-  # missingChart <- function(data, minimal = TRUE, sort = NULL, title = "Missing values", xlab = "Observations") {
-  #   if (length(sort) > 0 && all(sort %in% colnames(data))) {
-  #     data <- data[order(data[,sort]), ]
-  #     xlab = paste(xlab, "in", paste0(sort, collapse = ","), "order")
-  #   } else {
-  #     xlab = paste(xlab, "in natural order")
-  #   }
-  #   data <- dplyr::mutate_all(data, .fun = is.na)
-  #   if (minimal) {
-  #     someMissing <- base::apply(X = data, MARGIN = 2, FUN = any)
-  #     if (any(someMissing)) {
-  #       data <- data[, someMissing, drop = FALSE]
-  #     }
-  #   }
-  #   data$Sequence <- 1:nrow(data)
-  #   plot_df <- tidyr::pivot_longer(data, -Sequence,  names_to = "Variable", values_to = "Missing")
-  # 
-  #   names <- rev(colnames(data))
-  #   ggplot(plot_df, aes(x = Sequence, y = Variable, fill = Missing)) + 
-  #     geom_raster() +
-  #     labs(x = xlab, title = title, y = "Variable")
-  # }
 
   ###########################################################################
   output$MissingChart1 <- renderPlotly({
@@ -1049,7 +1115,7 @@ shinyServer(function(input, output, session) {
     if (length(input$ID) > 0) {
       choices <- union(input$ID, choices)
     }
-    updateSelectInput(session = session, inputId = "SortOrder", choices = as.list(choices), selected = input$ID)
+    updateSelectizeInput(session = session, inputId = "SortOrder", choices = as.list(choices), selected = input$ID)
   })
 
   # reactive Cols #### ------------------------------------------------------
@@ -1322,78 +1388,6 @@ shinyServer(function(input, output, session) {
     plotly(p)
   })
 
-  # ###########################################################################
-  # output$MD2 <- renderPlotly({
-  #   req(input$ProbType != "Any")
-  #   sd <- getSomeData()
-  #   if (!isRoleValid(input$SortOrder, sd)) {
-  #     order <- 1:nrow(sd)
-  #     xLabel <- paste("Observations in natural order")
-  #   } else {
-  #     order <- sd[,input$SortOrder, drop = TRUE]
-  #     xLabel <- paste("Observations in", input$SortOrder, "order")
-  #   }
-  #   mahal <- getMahalanobis2()
-  #   data <- data.frame(md2 = mahal$MD2, order)
-  #   if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
-  #      data$class <- sd[,input$Target]
-  #   }
-  #   if (input$ID != "") {
-  #     data$ID <- sd[,input$ID, drop = TRUE]
-  #   }
-  #   data <- data[order(order), ]
-  #   data$sequence <- 1:nrow(data)
-  #   thresh <- qchisq(p = 0.999, df = mahal$nvar)
-  #   plot <- ggplot(data = data, mapping = aes(y = md2, x = sequence)) +
-  #     scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
-  #     labs(y = "Mahalanobis distance squared", x = xLabel,
-  #          title = "Outlier plot") +
-  #     geom_abline(slope = 0, intercept = thresh, color = "red") 
-  # 
-  #   if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
-  #     plot <- plot +
-  #       geom_point(mapping = aes(color = class)) +
-  #       theme(legend.position = "left")
-  #   } else {
-  #     plot <- plot +
-  #       geom_point() +
-  #       theme(legend.position = "none")
-  #   }
-  #   plotly(plot, tooltip = c("class", "md2", "sequence"))
-  # })
-  # 
-  # ###########################################################################
-  # output$qqplot <- renderPlotly({
-  #   req(input$ProbType != "Any")
-  #   mahal <- getMahalanobis2()
-  #   dof <- mahal$nvar
-  #   data <- data.frame(md2 = mahal$MD2)
-  # 
-  #   sd <- getSomeData()
-  #   if (input$ID != "") {
-  #     data$ID <- sd[ ,input$ID, drop = TRUE]
-  #   }
-  #   plot <- if (input$ProbType == "Classification" && nlevels(sd[,input$Target]) > 1) {
-  #     data$class <- sd[,input$Target]
-  #     data <- data[order(data$md2), , drop = FALSE]
-  #     ggplot(data = data, mapping = aes(sample = md2, color = class)) +
-  #       geom_qq(distribution = stats::qchisq, dparams = dof) +
-  #       geom_qq_line(distribution = stats::qchisq, dparams = dof) +
-  #       scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
-  #       scale_x_continuous(limits = c(0, max(data$md2)*1.1)) +
-  #       labs(x = "Quantiles of Chi squared", y = "Mahalanobis distance squared", title = "Quantile plot")
-  #   } else {
-  #     data <- data[order(data$md2), , drop = FALSE]
-  #     ggplot(data = data, mapping = aes(sample = md2)) +
-  #       geom_qq(distribution = stats::qchisq, dparams = dof) +
-  #       geom_qq_line(distribution = stats::qchisq, dparams = dof) +
-  #       scale_y_continuous(limits = c(0, max(data$md2)*1.1)) +
-  #       scale_x_continuous(limits = c(0, max(data$md2)*1.1)) +
-  #       labs(x = "Quantiles of Chi squared", y = "Mahalanobis distance squared", title = "Quantile - Quantile plot")
-  #   }
-  #   plotly(plot, tooltip = c("class", "md2"))
-  # })
-
   ###########################################################################
   output$OutlierPlots <- renderPlotly({
     req(input$ProbType != "Any")
@@ -1525,7 +1519,7 @@ shinyServer(function(input, output, session) {
     d <- as.matrix(na.omit(d))
     minPts <- ncol(d) + 1
     clust <- dbscan::hdbscan( x = d, minPts = minPts, gen_simplified_tree = FALSE, gen_hdbscan_tree = TRUE)
-    output$Clusters <- renderValueBox({
+    output$ClusterCount <- renderValueBox({
       valueBox(subtitle = "Number of clusters", value = length(unique(clust$cluster)) - 1, color = EDAColour)
     })
     output$Outliers <- renderValueBox({
@@ -1654,9 +1648,9 @@ shinyServer(function(input, output, session) {
       shinyjs::enable(id = "DimReductType")
       ds <- getDataSummary()
       if (input$Target %in% rownames(ds)) {
-        updateSelectInput(session = session, inputId = "DimReductType", choices = list("PCA","PLS","MDS","isoMDS","Sammon"), selected = "PLS")
+        updateSelectizeInput(session = session, inputId = "DimReductType", choices = list("PCA","PLS","MDS","isoMDS","Sammon"), selected = "PLS")
       } else {
-        updateSelectInput(session = session, inputId = "DimReductType", choices = list("PCA","MDS","isoMDS","Sammon"), selected = "PCA")
+        updateSelectizeInput(session = session, inputId = "DimReductType", choices = list("PCA","MDS","isoMDS","Sammon"), selected = "PCA")
       }
     }
   })
@@ -1772,7 +1766,7 @@ shinyServer(function(input, output, session) {
     if (ncol(data) > maxcols) {
       vi <- getVarImp()
       vi <- vi[names(vi) %in% colnames(data)]
-      vi <- vi[1:min(maxcols, length(vi))]
+      vi <- vi[1:min(c(maxcols, length(vi)))]
       data <- data[, colnames(data) %in% c(input$Target,names(vi))]
     }
     data <- na.omit(data)
@@ -1810,7 +1804,7 @@ shinyServer(function(input, output, session) {
     if (ncol(data) > maxcols) {
       vi <- getVarImp()
       vi <- vi[names(vi) %in% colnames(data)]
-      vi <- vi[1:min(maxcols, length(vi))]
+      vi <- vi[1:min(c(maxcols, length(vi)))]
       if (ds[input$Target, "numeric"]) {
         vi <- c(100,vi)
         names(vi)[1] <- input$Target
@@ -1876,7 +1870,7 @@ shinyServer(function(input, output, session) {
 
     if (ncol(data) > maxcols) {
       vi <- getVarImp()
-      vi <- vi[1:min(maxcols, length(vi))]
+      vi <- vi[1:min(c(maxcols, length(vi)))]
       data <- data[, subset %in% c(input$Target,names(vi))]
     }
     req(ncol(data) > 1)
@@ -1891,18 +1885,52 @@ shinyServer(function(input, output, session) {
     plot
   }, bg = "transparent")
 
-  ###########################################################################
-  output$MissCorr <- renderPlot({
-    d <- getSomeData()
+  # ###########################################################################
+  # output$MissCorr <- renderPlot({
+  #   d <- getSomeData()
+  #   m <- ifelse(is.na(d), 1, 0)
+  #   cm <- colMeans(m)
+  #   m <- m[, cm > 0 & cm < 1, drop = FALSE]
+  #   req(ncol(m) > 0)
+  #   corrgram::corrgram(cor(m), order = "OLO", abs = TRUE)  #TODO change to ggplot as per other correlation chart
+  #   title(main = "Variable missing value correlation",
+  #         sub = "Notice whether variables are missing in sets")
+  # }, bg = "transparent")
+
+  output$MissCorr <- renderPlotly({
+    d = getSomeData()
     m <- ifelse(is.na(d), 1, 0)
     cm <- colMeans(m)
-    m <- m[, cm > 0 & cm < 1, drop = FALSE]
-    req(ncol(m) > 0)
-    corrgram::corrgram(cor(m), order = "OLO", abs = TRUE)  #TODO change to ggplot as per other correlation chart
-    title(main = "Variable missing value correlation",
-          sub = "Notice whether variables are missing in sets")
-  }, bg = "transparent")
+    data <- m[, cm > 0 & cm < 1, drop = FALSE]
+    req(ncol(data) > 0)
 
+    if (input$CorMethod == "Distance") {
+      corr <- cor.distance(data)
+      title <- "Variable Distance Correlation"
+    } else if (input$CorMethod == "Predictive Power") {
+      corr <- getPPS()
+      title <- "Variable Predictive Power Correlation"
+    } else {
+      corr <- cor(data, method = tolower(input$CorMethod), use = "pairwise.complete.obs")
+      if (input$CorAbs) {
+        corr <- abs(corr)
+        title <- paste0("Variable ",input$CorMethod," (absolute) Correlation")
+        
+      } else {
+        title <- paste0("Variable ", input$CorMethod, " Correlation")
+      }
+    }
+    p <- if (input$CorGrouping == "none") {
+      ggcorrplot(corr = corr, method = "square", hc.order = FALSE, type = "full", lab = TRUE,
+                 title = title, show.diag = FALSE, show.legend = FALSE)
+    } else {
+      title <- paste(title,"Ordered by", input$CorGrouping)
+      ggcorrplot(corr = corr, method = "square", hc.order = TRUE, type = "full", lab = TRUE,
+                 title = title, show.diag = FALSE, show.legend = FALSE, hc.method = input$CorGrouping)
+    }
+    plotly(p, tooltip = c("Var1","Var2","value"))
+  })
+  
   ###########################################################################
   getMissingnessTree <- reactive({
     d <- getData()
@@ -2115,19 +2143,19 @@ shinyServer(function(input, output, session) {
     updateCheckboxInput(session = session, inputId = "MissingObs",       value = FALSE)
     updateCheckboxInput(session = session, inputId = "Shadow",           value = FALSE)
     updateCheckboxInput(session = session, inputId = "Unknown",          value = FALSE)
-    updateSelectInput(  session = session, inputId = "Impute",           selected = "none")
-    updateSelectInput(  session = session, inputId = "Balance",          selected = "none")
-    updateSelectInput(  session = session, inputId = "Variance",         selected = "none")
+    updateSelectizeInput(session = session, inputId = "Impute",           selected = "none")
+    updateSelectizeInput(session = session, inputId = "Balance",          selected = "none")
+    updateSelectizeInput(session = session, inputId = "Variance",         selected = "none")
     updateCheckboxInput(session = session, inputId = "LinComb",          value = FALSE)
     updateCheckboxInput(session = session, inputId = "YJ",               value = FALSE)
     updateCheckboxInput(session = session, inputId = "Text",             value = FALSE)
     updateCheckboxInput(session = session, inputId = "Other",            value = FALSE)
     updateCheckboxInput(session = session, inputId = "Convert",          value = FALSE)
-    updateSelectInput(  session = session, inputId = "DateFeatures",     selected = NULL)
+    updateSelectizeInput( session = session, inputId = "DateFeatures",     selected = NULL)
     updateCheckboxInput(session = session, inputId = "Cyclic",           value = FALSE)
     updateCheckboxInput(session = session, inputId = "Center",           value = FALSE)
     updateCheckboxInput(session = session, inputId = "Scale",            value = FALSE)
-    updateSelectInput(  session = session, inputId = "DimReduce",        selected = "none")
+    updateSelectizeInput(session = session, inputId = "DimReduce",        selected = "none")
     updateCheckboxInput(session = session, inputId = "FeatureSelection", value = FALSE)
     updateCheckboxInput(session = session, inputId = "Clusters",         value = FALSE)
     updateCheckboxInput(session = session, inputId = "Poly",             value = FALSE)
@@ -2461,7 +2489,7 @@ shinyServer(function(input, output, session) {
       } else {
         choices = list("None" = "none", "Omit" = "omit", "Weight-of-evidence encoding" = "woe", "Mean encoding" = "mean", "Hash encoding" = "hash", "Embedded encoding" = "embed", "Binary encoding" = "binary")
       }
-      updateSelectInput(session = session, inputId = "String", choices = choices, selected = choices[1])
+      updateSelectizeInput(session = session, inputId = "String", choices = choices, selected = choices[1])
     }
   )
 
@@ -2576,7 +2604,7 @@ shinyServer(function(input, output, session) {
     } else {
       choices <- list("None" = "none", "PLS (sup)" = "pls", "UMAP (sup)" = "umap", "Correlation" = "corr", "PCA" = "pca", "ICA" = "ica", "IsoMap" = "isomap", "kPCA" = "kpca")
     }
-    updateSelectInput(session = session, inputId = "DimReduce", choices = choices, selected = input$DimReduce)
+    updateSelectizeInput(session = session, inputId = "DimReduce", choices = choices, selected = input$DimReduce)
     if (input$ProbType ==  "Classification") {
       shinyjs::showElement(id = "Centers")
     } else {
@@ -3035,8 +3063,8 @@ shinyServer(function(input, output, session) {
   ###########################################################################
   observe({
     tags <- getTags()
-    updateSelectInput(session = session, inputId = "IncFeatures", choices = setdiff(tags, input$ExcFeatures), selected = input$IncFeatures)
-    updateSelectInput(session = session, inputId = "ExcFeatures", choices = setdiff(tags, input$IncFeatures), selected = input$ExcFeatures)
+    updateSelectizeInput(session = session, inputId = "IncFeatures", choices = setdiff(tags, input$ExcFeatures), selected = input$IncFeatures)
+    updateSelectizeInput(session = session, inputId = "ExcFeatures", choices = setdiff(tags, input$IncFeatures), selected = input$ExcFeatures)
   })
 
   ###########################################################################
@@ -3056,11 +3084,11 @@ shinyServer(function(input, output, session) {
     req(input$ProbType)
     req(!is.null(react$Prob2Class), length(react$Prob2Class) > 0)
     if (input$ProbType == "Classification" && react$Prob2Class) {
-      updateSelectInput(session = session, inputId = "HypMetric", choices = biClassChoices, selected = biClassChoices[1])
+      updateSelectizeInput(session = session, inputId = "HypMetric", choices = biClassChoices, selected = biClassChoices[1])
     } else if (input$ProbType == "Classification") {
-      updateSelectInput(session = session, inputId = "HypMetric", choices = multiClassChoices, selected = multiClassChoices[1])
+      updateSelectizeInput(session = session, inputId = "HypMetric", choices = multiClassChoices, selected = multiClassChoices[1])
     } else {
-      updateSelectInput(session = session, inputId = "HypMetric", choices = regChoices, selected = regChoices[1])
+      updateSelectizeInput(session = session, inputId = "HypMetric", choices = regChoices, selected = regChoices[1])
     }
   })
 
@@ -3452,9 +3480,9 @@ shinyServer(function(input, output, session) {
   ###########################################################################
   observeEvent(input$Groups, {
     if (input$Groups != "") {
-      updateSelectInput(session = session, inputId = "Method", label = "Method", choices = list("LGOCV",'adaptive_LGOCV'), selected = "LGOCV")
+      updateSelectizeInput(session = session, inputId = "Method", label = "Method", choices = list("LGOCV",'adaptive_LGOCV'), selected = "LGOCV")
     } else {
-      updateSelectInput(session = session, inputId = "Method", label = "Method", choices = list("boot", "boot632", "optimism_boot", "boot_all", "cv", "repeatedcv", "LOOCV", "adaptive_cv", "adaptive_boot"), selected = "boot")
+      updateSelectizeInput(session = session, inputId = "Method", label = "Method", choices = list("boot", "boot632", "optimism_boot", "boot_all", "cv", "repeatedcv", "LOOCV", "adaptive_cv", "adaptive_boot"), selected = "boot")
     }
   })
 
@@ -3838,7 +3866,7 @@ shinyServer(function(input, output, session) {
     req(input$Target %in% colnames(d))
     if (input$ProbType == "Classification") {
       Levfreq <- sort(table(d[, input$Target]), decreasing = FALSE)
-      updateSelectInput(session = session, inputId = "Positive", choices = as.list(names(Levfreq)), selected = as.list(names(Levfreq[1])))
+      updateSelectizeInput(session = session, inputId = "Positive", choices = as.list(names(Levfreq)), selected = as.list(names(Levfreq[1])))
     }
   })
 
@@ -3927,7 +3955,9 @@ shinyServer(function(input, output, session) {
   ###########################################################################
   output$ClassStats <- renderPrint({
     req(input$ProbType == "Classification")
-    print(getConfusionMatrix())
+    cm <- getConfusionMatrix()
+    req(cm)
+    print(cm)
   })
 
   ###########################################################################
@@ -4055,6 +4085,7 @@ shinyServer(function(input, output, session) {
     bwplot(mods, models = mods$models[subset], notch = input$ShowNotches)   #metric = "RMSE", main =""
   }, bg = "transparent")
 
+  
   ###########################################################################
   output$ResidualCorr <- renderPlot({
     rmodels <- getResampledModels()
@@ -4065,15 +4096,37 @@ shinyServer(function(input, output, session) {
         rmodels$values <- rmodels$values[, !grepl(pattern = paste0("^", name, "~"), x = colnames(rmodels$values))]
       }
     }
-
+    
     req(length(rmodels$models) > 1)
-    modelSet <- react$ModelSet[rmodels$models]
-    cormat <- caret::modelCor(resamples(modelSet))
-    try({
-      corrplot::corrplot(corr = cormat, method = "circle", type = "full", title = "Model Correlation", order = "hclust", diag = TRUE, mar = c(10,4.5,4.5,3) )
-    }, silent = TRUE)
-  }, bg = "transparent")
-
+    data <- caret::resamples(react$ModelSet[rmodels$models])
+    data <- data$values[, grep(paste("~", input$HypMetric, sep = ""), names(x$values))]
+    colnames(data) <- gsub(paste("~", input$HypMetric, sep = ""), "", colnames(data))
+    if (input$CorMethod == "Distance") {
+      corr <- cor.distance(data)
+      title <- "Distance Correlation"
+    } else if (input$CorMethod == "Predictive Power") {
+      corr <- getPPS()
+      title <- "Predictive Power"
+    } else {
+      corr <- cor(data, method = tolower(input$CorMethod), use = "pairwise.complete.obs")
+      if (input$CorAbs) {
+        corr <- abs(corr)
+        title <- paste0(input$CorMethod," (absolute) Correlation")
+      } else {
+        title <- paste0(input$CorMethod, " Correlation")
+      }
+    }
+    p <- if (input$CorGrouping == "none") {
+      ggcorrplot(corr = corr, method = "square", hc.order = FALSE, type = "full", lab = TRUE,
+                 title = title, show.diag = FALSE, show.legend = FALSE)
+    } else {
+      title <- paste(title,"Ordered by", input$CorGrouping)
+      ggcorrplot(corr = corr, method = "square", hc.order = TRUE, type = "full", lab = TRUE,
+                 title = title, show.diag = FALSE, show.legend = FALSE, hc.method = input$CorGrouping)
+    }
+    plotly(p, tooltip = c("Model1","Model2","value"))
+  })
+  
   ###########################################################################
   output$ModelTree <- renderPlot({
     rmodels <- getResampledModels()
@@ -4936,6 +4989,8 @@ shinyServer(function(input, output, session) {
     hideElement(id = "NumComp")
     hideElement(id = "PolyDegree")
     hideElement(id = "Klof")
+    hideElement(id = "DimReductType")
+    
     if (input$Navbar == "DataLoad") {
       showElement(id = "Header")
       showElement(id = "DateFormat")
@@ -5003,6 +5058,7 @@ shinyServer(function(input, output, session) {
       showElement(id = "ScaleChart")
       showElement(id = "Continuous")
       showElement(id = "HideIrrelevant")
+      showElement(id = "DimReductType")
       showElement(id = "UseYJ")
       showElement(id = "Multiplier")
     } else if (input$Navbar == "Bagplot") {
@@ -5037,6 +5093,9 @@ shinyServer(function(input, output, session) {
       showElement(id = "MaxRows")
     } else if (input$Navbar ==  "MissCorrelation") {
       showElement(id = "MaxRows")
+      showElement(id = "CorAbs")
+      showElement(id = "CorMethod")
+      showElement(id = "CorGrouping")
     } else if (input$Navbar ==  "MissPattern") {
       showElement(id = "MaxRows")
     } else if (input$Navbar ==  "MissExplain") {
